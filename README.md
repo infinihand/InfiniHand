@@ -68,7 +68,7 @@ python -m infinihand.infer \
   --mask-source head --no-ba --output /path/to/outputs/demo
 ```
 
-To enable sparse BA, omit `--no-ba` and supply `--droid-weights /path/to/weights/droid.pth`. The default BA mode uses a binary keyframe pool; `--ba-mode fixed` selects fixed-stride refinement. Optional SAM3 tracking uses `--mask-source sam3` and the assets described in [the inference guide](docs/INFERENCE.md).
+To enable sparse BA, omit `--no-ba` and supply `--droid-weights /path/to/weights/droid.pth`. The default BA mode uses a binary keyframe pool; `--ba-mode fixed` selects fixed-stride refinement. Optional SAM3 tracking uses `--mask-source sam3` and the assets described in [the SAM3 setup guide](third_party/ego_step2/README.md).
 
 Outputs include `camera_space.npz`, `world_space.npz` and `SUCCESS.json`; BA also writes `trajectory.npz`. Hand slots are right, left. Use a fresh output directory. Each invocation accepts 4–8192 frames; BA runs after feed-forward prediction. World coordinates use the predicted camera scale.
 
