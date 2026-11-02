@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import importlib.util
 import copy
 import os
 import subprocess
-import sys
-import types
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -37,10 +34,10 @@ _WILOR_ROOT = _PROJECT_ROOT / "third_party" / "WiLoR"
 
 @dataclass
 class LingBotMapHandConfig:
-    lingbotmap_root: str = "/path/to/infinihand/third_party/lingbot-map"
+    lingbotmap_root: str = "/path/to/infinihand/infinihand/lingbot_map"
     lingbotmap_ckpt: str = ""
-    wilor_root: str = "/path/to/infinihand/third_party/WiLoR"
-    wilor_cfg: str = "/path/to/infinihand/third_party/WiLoR/pretrained_models/model_config.yaml"
+    wilor_root: str = "/path/to/infinihand/infinihand/wilor"
+    wilor_cfg: str = "/path/to/infinihand/infinihand/wilor/pretrained_models/model_config.yaml"
     wilor_ckpt: str = ""
     load_wilor_checkpoint: bool = True
     mano_model_path: str = "/path/to/weights/mano"
@@ -478,10 +475,7 @@ def soft_mask_logits_to_boxes(
 class LingBotMapBackbone(nn.Module):
     def __init__(self, cfg: LingBotMapHandConfig) -> None:
         super().__init__()
-        root = str(Path(cfg.lingbotmap_root).resolve())
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        from lingbot_map.models.gct_stream_window import GCTStream
+        from infinihand.lingbot_map.models.gct_stream_window import GCTStream
 
         self.patch_size = 14
         self.step_memory_enabled = bool(cfg.step_memory_enabled)
@@ -1209,50 +1203,6 @@ class LingBotMapBackboneOutput:
     pose_enc: Optional[torch.Tensor] = None
 
 
-def _install_wilor_import_shims() -> None:
-    try:
-        import pytorch_lightning  # noqa: F401
-    except ModuleNotFoundError:
-        class _LightningModule(nn.Module):
-            def save_hyperparameters(self, *args, **kwargs):
-                return None
-
-        pl_mod = types.ModuleType("pytorch_lightning")
-        utilities_mod = types.ModuleType("pytorch_lightning.utilities")
-        rank_zero_mod = types.ModuleType("pytorch_lightning.utilities.rank_zero")
-        utilities_mod.rank_zero_only = lambda fn: fn
-        rank_zero_mod.rank_zero_only = lambda fn: fn
-        utilities_mod.rank_zero = rank_zero_mod
-        pl_mod.LightningModule = _LightningModule
-        pl_mod.utilities = utilities_mod
-        sys.modules["pytorch_lightning"] = pl_mod
-        sys.modules["pytorch_lightning.utilities"] = utilities_mod
-        sys.modules["pytorch_lightning.utilities.rank_zero"] = rank_zero_mod
-
-    try:
-        import pyrender  # noqa: F401
-    except ModuleNotFoundError:
-        class _Dummy:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def __call__(self, *args, **kwargs):
-                return _Dummy()
-
-            def __getattr__(self, name):
-                return _Dummy()
-
-        pyrender_mod = types.ModuleType("pyrender")
-        for name in (
-            "Node", "DirectionalLight", "PointLight", "OffscreenRenderer",
-            "MetallicRoughnessMaterial", "Scene", "IntrinsicsCamera",
-        ):
-            setattr(pyrender_mod, name, _Dummy)
-        pyrender_mod.Mesh = types.SimpleNamespace(from_trimesh=lambda *args, **kwargs: _Dummy())
-        pyrender_mod.RenderFlags = types.SimpleNamespace(RGBA=0)
-        sys.modules["pyrender"] = pyrender_mod
-
-
 @dataclass
 class HandFeatureBatch:
     """Canonical fixed-slot hand features returned by a hand feature provider.
@@ -1365,12 +1315,8 @@ class WiLoRHandFeatureProvider(HandFeatureProvider):
             chunk_size=int(cfg.wilor_feature_chunk_size),
             canonicalize_left=True,
         )
-        _install_wilor_import_shims()
-        root = str(Path(cfg.wilor_root).resolve())
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        from wilor.configs import get_config
-        from wilor.models.backbones import create_backbone
+        from infinihand.wilor.configs import get_config
+        from infinihand.wilor.models.backbones import create_backbone
 
         model_cfg = get_config(cfg.wilor_cfg, update_cachedir=True)
         model_cfg.defrost()
@@ -1454,7 +1400,7 @@ def _apply_dpt_uv_position_embedding(
     ratio: float = 0.1,
 ) -> torch.Tensor:
     """Apply LingBotMap DPT's exact UV positional embedding."""
-    from lingbot_map.heads.utils import create_uv_grid, position_grid_to_embed
+    from infinihand.lingbot_map.heads.utils import create_uv_grid, position_grid_to_embed
 
     image_h, image_w = image_hw
     patch_h, patch_w = x.shape[-2:]
@@ -1902,20 +1848,7 @@ class HaWoRQueryMANOHead(nn.Module):
         if camera_mode not in {"weak_perspective", "log_z"}:
             raise ValueError(f"Unsupported MANO camera_mode={camera_mode!r}")
         self.camera_mode = camera_mode
-        _install_wilor_import_shims()
-        root = str(Path(cfg.wilor_root).resolve())
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        try:
-            from wilor.models.components.pose_transformer import TransformerDecoder
-        except ModuleNotFoundError:
-            try:
-                hawor_root = Path(os.environ.get("HAWOR_ROOT", ".")).resolve()
-                if str(hawor_root) not in sys.path:
-                    sys.path.insert(0, str(hawor_root))
-                from lib.models.components.pose_transformer import TransformerDecoder
-            except ModuleNotFoundError:
-                TransformerDecoder = _HaWoRTransformerDecoderFallback
+        TransformerDecoder = _HaWoRTransformerDecoderFallback
 
         transformer_args = dict(
             depth=6,
@@ -2291,13 +2224,7 @@ class LingBotMapHand(nn.Module):
         )
 
     def _build_mano_layers(self) -> None:
-        wrapper_path = Path(self.cfg.wilor_root).resolve() / "wilor/models/mano_wrapper.py"
-        spec = importlib.util.spec_from_file_location("lingbotmap_hand_mano_wrapper", wrapper_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Could not load WiLoR MANO wrapper from {wrapper_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        MANO = module.MANO
+        from infinihand.wilor.models.mano_wrapper import MANO
 
         kwargs = dict(
             model_path=self.cfg.mano_model_path,

@@ -37,7 +37,7 @@ lingbot_enable_camera_head: true
 lingbot_lr: 1.0e-05
 lingbot_tune_mode: frozen
 lingbotmap_ckpt: /path/to/weights/lingbot-map.pt
-lingbotmap_root: /path/to/infinihand/third_party/lingbot-map
+lingbotmap_root: /path/to/infinihand/infinihand/lingbot_map
 load_wilor_checkpoint: true
 log_interval: 50
 loss_outlier_bootstrap_steps: 1000
@@ -83,6 +83,6 @@ train_mano_modules_only: true
 train_steps: 100000
 warmup_steps: 10000
 weight_decay: 0.01
-wilor_cfg: /path/to/infinihand/third_party/WiLoR/pretrained_models/model_config.yaml
+wilor_cfg: /path/to/infinihand/infinihand/wilor/pretrained_models/model_config.yaml
 wilor_ckpt: /path/to/weights/wilor_final.ckpt
-wilor_root: /path/to/infinihand/third_party/WiLoR
+wilor_root: /path/to/infinihand/infinihand/wilor

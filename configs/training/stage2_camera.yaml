@@ -1,6 +1,6 @@
 output_dir: /path/to/outputs/stage2_camera
 ego3r_training_root: /path/to/infinihand/infinihand/training
-wilor_root: /path/to/infinihand/third_party/WiLoR
+wilor_root: /path/to/infinihand/infinihand/wilor
 dataset_sampling_version: ego_data_v2_sqrt_frames
 sampling_weights:
   ego_data_v2_sqrt_frames:
@@ -31,9 +31,9 @@ weight_decay: 0.01
 grad_clip_norm: 1
 finetune_checkpoint: ''
 model_variant: mutual_joint_fusion
-lingbotmap_root: /path/to/infinihand/third_party/lingbot-map
+lingbotmap_root: /path/to/infinihand/infinihand/lingbot_map
 lingbotmap_ckpt: /path/to/weights/lingbot-map.pt
-wilor_cfg: /path/to/infinihand/third_party/WiLoR/pretrained_models/model_config.yaml
+wilor_cfg: /path/to/infinihand/infinihand/wilor/pretrained_models/model_config.yaml
 wilor_ckpt: /path/to/weights/wilor_final.ckpt
 load_wilor_checkpoint: true
 freeze_backbone: true

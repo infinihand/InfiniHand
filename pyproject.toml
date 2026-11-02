@@ -21,3 +21,7 @@ include = ["infinihand*"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+"infinihand.wilor" = ["LICENSE", "pretrained_models/*.yaml"]
+"infinihand.lingbot_map" = ["LICENSE.txt"]

@@ -47,7 +47,7 @@ from .gradient_sync import sync_finite_sample_gradients
 class TrainConfig:
     output_dir: str = "/path/to/outputs/lingbotmap_hand_arctic"
     ego3r_training_root: str = "/path/to/infinihand/infinihand/training"
-    wilor_root: str = "/path/to/infinihand/third_party/WiLoR"
+    wilor_root: str = "/path/to/infinihand/infinihand/wilor"
     dataset_json: str = "/path/to/config/datasets/hand/ego_data_processed_dexycb.json"
     dataset_jsons: list[str] = field(default_factory=list)
     dataset_sampling_version: str = "dexycb_only"
@@ -101,9 +101,9 @@ class TrainConfig:
     resume_checkpoint: str = ""
     resume_checkpoint_step: int = -1
     model_variant: str = "mutual_joint_fusion"
-    lingbotmap_root: str = "/path/to/infinihand/third_party/lingbot-map"
+    lingbotmap_root: str = "/path/to/infinihand/infinihand/lingbot_map"
     lingbotmap_ckpt: str = ""
-    wilor_cfg: str = "/path/to/infinihand/third_party/WiLoR/pretrained_models/model_config.yaml"
+    wilor_cfg: str = "/path/to/infinihand/infinihand/wilor/pretrained_models/model_config.yaml"
     wilor_ckpt: str = "/path/to/weights/wilor_final.ckpt"
     load_wilor_checkpoint: bool = False
     image_height: int = 378

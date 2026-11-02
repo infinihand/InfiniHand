@@ -40,7 +40,7 @@ python -m pip install --no-build-isolation ./third_party/droid
 
 Obtain the licensed [MANO](https://mano.is.tue.mpg.de/) models and WiLoR's `mano_mean_params.npz`. Place them in `/path/to/weights/mano/`. Training expects `mano_data` under the configured WiLoR root to point to that directory. Follow the third-party terms in [NOTICE.md](NOTICE.md).
 
-All external paths in the configurations are `/path/to/...` placeholders. Replace them before running. Set `lingbotmap_root`, `wilor_root`, and `wilor_cfg` to the bundled implementations in your checkout; set the MANO, data, checkpoint, cache and output locations to your installation.
+All external paths in the configurations are `/path/to/...` placeholders. Replace them before running. LingBot-Map and WiLoR runtime code is included in `infinihand/lingbot_map/` and `infinihand/wilor/`. Set the bundled configuration and asset paths for your checkout; set the MANO, data, checkpoint, cache and output locations to your installation.
 
 ## Inference
 
