@@ -1,12 +1,11 @@
 # InfiniHand: Streaming World-Space Hand Motion Estimation from Egocentric Video
 
 [![Project Website](https://img.shields.io/badge/InfiniHand-Website-4CAF50?logo=googlechrome&logoColor=white)](https://infinihand.github.io/)
+[![Model](https://img.shields.io/badge/Hugging_Face-Model-FFD21E?logo=huggingface&logoColor=black)](https://huggingface.co/cskrren/InfiniHand)
 [![arXiv](https://img.shields.io/badge/arXiv-2609.35743-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2609.35743)
 [![Demo](https://img.shields.io/badge/Video-Demo-547354)](https://infinihand.github.io/#demo)
 
 [Kerui Ren](https://scholar.google.com/citations?user=5kW5apkAAAAJ), Kaiwen Song, Weiguang Zhao, Yuxi Wang, Yufei Liu, [Bo Dai](https://daibo.info/), Haoyu Guo, Chunhua Shen, [Mulin Yu](https://scholar.google.com/citations?user=w0Od3hQAAAAJ), [Tao Lu](https://scholar.google.com/citations?user=Ch28NiIAAAAJ), Junting Dong
-
-[🤗 Model weights](https://huggingface.co/cskrren/InfiniHand)
 
 ## Pipeline
 
