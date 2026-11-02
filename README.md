@@ -69,7 +69,7 @@ python -m infinihand.infer \
   --output /path/to/outputs/demo
 ```
 
-Use `--no-ba` for feed-forward-only inference. The BA defaults are `--ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second. Keyframe count and full-sequence BA cost grow with video length; this implementation does not provide bounded-cost sliding-window optimization.
+Use `--no-ba` for feed-forward-only inference. The BA defaults are `--ba-mode fixed --ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second. Keyframe count and full-sequence BA cost grow with video length; this implementation does not provide bounded-cost sliding-window optimization.
 
 Use `--ba-depth-init sparse` to initialize inverse depth from RGB feature matches triangulated with Camera head poses and the supplied intrinsics. This uses no ground-truth poses or depth, inherits the predicted camera scale, and leaves depth free to change during BA. The default `none` uses constant inverse-depth initialization, also optimized by BA.
 

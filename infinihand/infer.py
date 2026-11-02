@@ -698,6 +698,7 @@ def parser():
     p.add_argument('--ba-python', default=sys.executable)
     p.add_argument('--droid-weights', type=Path, default=Path('/path/to/weights/droid.pth'))
     p.add_argument('--no-ba', action='store_true')
+    p.add_argument('--ba-mode', choices=['fixed'], default='fixed', help='Fixed-stride keyframe BA')
     p.add_argument('--ba-stride', type=int, default=10)
     p.add_argument('--ba-depth-init', choices=['none', 'sparse'], default='none')
     p.add_argument('--ba-no-reject-outliers', action='store_true', help='Disable update rejection for ablations')
