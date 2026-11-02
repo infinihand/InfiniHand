@@ -8,7 +8,7 @@ def parser():
  p.add_argument('--video',type=Path,required=True);p.add_argument('--output',type=Path,required=True)
  p.add_argument('--checkpoint',type=Path,required=True,help='Complete weights exported from the current training runs');p.add_argument('--config',type=Path,default=ROOT/'configs/infinihand_v1.json')
  p.add_argument('--intrinsics',type=Path,required=True,help='JSON: fx,fy,cx,cy,image_width,image_height, in original video pixels')
- p.add_argument('--mask-source',choices=['sam3','head'],default='head');p.add_argument('--mask-threshold',type=float,default=.9)
+ p.add_argument('--mask-source',choices=['base','sam3-tracking'],default='base');p.add_argument('--mask-threshold',type=float,default=.9)
  p.add_argument('--sam3-python',default=sys.executable);p.add_argument('--sam3-source',type=Path,default=Path('/path/to/infinihand/third_party/sam3'));p.add_argument('--sam3-checkpoint',type=Path,default=Path('/path/to/weights/sam3.pt'));p.add_argument('--detector',type=Path,default=Path('/path/to/weights/detector.pt'))
  p.add_argument('--ba-python',default=sys.executable);p.add_argument('--droid-weights',type=Path,default=Path('/path/to/weights/droid.pth'));p.add_argument('--no-ba',action='store_true');p.add_argument('--ba-stride',type=int,default=20)
  p.add_argument('--camera-checkpoint',type=Path,help='Trusted camera-head-only training checkpoint; leaves all hand/mask weights untouched')
@@ -22,7 +22,7 @@ def main():
  required=[a.video,a.intrinsics,a.checkpoint,a.config]
  if a.camera_checkpoint:required.append(a.camera_checkpoint)
  if a.ba_stride<1 or a.ba_pool_capacity<a.ba_stride:raise ValueError('Require ba-pool-capacity >= ba-stride >= 1')
- if a.mask_source=='sam3':required += [a.sam3_checkpoint,a.detector,a.sam3_source]
+ if a.mask_source=='sam3-tracking':required += [a.sam3_checkpoint,a.detector,a.sam3_source]
  if not a.no_ba:required += [a.droid_weights]
  for path in required:
   if not path.exists():raise FileNotFoundError(path)
@@ -41,11 +41,11 @@ def main():
  if n<4:raise ValueError('At least four frames required')
  if n>8192:raise ValueError('Maximum supported temporal index is 8192')
  boxes=np.zeros((n,2,4),np.float32);valid=np.zeros((n,2),bool)
- if a.mask_source=='sam3':
+ if a.mask_source=='sam3-tracking':
   import yaml
-  cfg=yaml.safe_load((ROOT/'third_party/ego_step2/configs/default.yaml').read_text());cfg.update(output_fps=fps,write_visualization=False,wandb_mode="disabled")
-  cf=a.output/'sam3_config.yaml';cf.write_text(yaml.safe_dump(cfg));env=os.environ.copy();env['PYTHONPATH']=str(ROOT/'third_party/ego_step2/src')
-  subprocess.run([a.sam3_python,'-m','hand_detection_sam3_mask','frames','--frames-dir',str(D.resolve()),'--output-dir',str((a.output/'sam3').resolve()),'--config',str(cf.resolve()),'--detector-weight',str(a.detector.resolve()),'--sam3-checkpoint',str(a.sam3_checkpoint.resolve()),'--sam3-src',str(a.sam3_source.resolve())],env=env,check=True)
+  cfg=yaml.safe_load((ROOT/'third_party/sam3_tracking/configs/default.yaml').read_text());cfg.update(output_fps=fps,write_visualization=False,wandb_mode="disabled")
+  cf=a.output/'sam3_config.yaml';cf.write_text(yaml.safe_dump(cfg));env=os.environ.copy();env['PYTHONPATH']=str(ROOT/'third_party/sam3_tracking/src')
+  subprocess.run([a.sam3_python,'-m','sam3_tracking','frames','--frames-dir',str(D.resolve()),'--output-dir',str((a.output/'sam3').resolve()),'--config',str(cf.resolve()),'--detector-weight',str(a.detector.resolve()),'--sam3-checkpoint',str(a.sam3_checkpoint.resolve()),'--sam3-src',str(a.sam3_source.resolve())],env=env,check=True)
   records=[json.loads(line) for line in (a.output/'sam3/masks.jsonl').read_text().splitlines()];assert len(records)==n*2
   seen=set()
   for row in records:
@@ -61,11 +61,11 @@ def main():
  images=np.stack([cv2.resize(cv2.imread(str(D/f'{i:06d}.png')),(518,378))[:,:,::-1] for i in range(n)])
  images=torch.from_numpy(np.ascontiguousarray(images)).permute(0,3,1,2).float().div_(255).unsqueeze(0).cuda()
  K=np.array([[Kd['fx'],0,Kd['cx']],[0,Kd['fy'],Kd['cy']],[0,0,1]],np.float32);K[0]*=518/w;K[1]*=378/h;intr=torch.from_numpy(K).view(1,1,3,3).expand(1,n,3,3).cuda()
- opts=dict(bbox_source='gt' if a.mask_source=='sam3' else 'mask',mask_threshold=a.mask_threshold)
- if a.mask_source=='sam3':opts.update(gt_hand_boxes=torch.from_numpy(boxes)[None].cuda(),gt_hand_valid=torch.from_numpy(valid)[None].cuda())
+ opts=dict(bbox_source='gt' if a.mask_source=='sam3-tracking' else 'mask',mask_threshold=a.mask_threshold)
+ if a.mask_source=='sam3-tracking':opts.update(gt_hand_boxes=torch.from_numpy(boxes)[None].cuda(),gt_hand_valid=torch.from_numpy(valid)[None].cuda())
  with torch.inference_mode():out,stats,timing=run_dual_stream(model,images,intr,**opts);world,_=camera_to_predicted_global(out)
  validate_contract(stats,n);arr={k:v.float().cpu().numpy() for k,v in out.items()};poses=world['pred_camera_to_anchor'].float().cpu().numpy()
- if a.mask_source=='head':boxes=arr['mask_tight_boxes'];valid=arr['presence_mask']>.5
+ if a.mask_source=='base':boxes=arr['mask_tight_boxes'];valid=arr['presence_mask']>.5
  for key,value in arr.items():
   if not np.isfinite(value).all():raise ValueError('Non-finite model output: '+key)
  np.savez_compressed(a.output/'camera_space.npz',**arr,valid=valid)

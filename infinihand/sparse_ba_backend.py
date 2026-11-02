@@ -17,9 +17,9 @@ class DroidSparseOptimizer:
         import torch
         import cv2
         from scipy.spatial.transform import Rotation
-        droid = Path(__file__).resolve().parents[1] / 'third_party/droid/droid_slam'
+        droid = Path(__file__).resolve().parents[1] / 'third_party/droid/droid_ba'
         sys.path.insert(0, str(droid))
-        from droid import Droid
+        from backend_runtime import DroidBackendRuntime
         import lietorch
         from .droid_corr_compat import install_corr_compat
         self.correlation_abi = install_corr_compat()
@@ -32,18 +32,14 @@ class DroidSparseOptimizer:
             raise ValueError('Backend iterations must be positive')
         self.iterations = iterations
         args = SimpleNamespace(weights=str(weights), buffer=max_keyframes+1,
-            image_size=[self.h,self.w], disable_vis=True, stereo=False, beta=.3,
-            filter_thresh=2.4,warmup=8,keyframe_thresh=4.,frontend_thresh=16.,
-            frontend_window=25,frontend_radius=2,frontend_nms=1,
+            image_size=[self.h,self.w], stereo=False, beta=.3,
             backend_thresh=22.,backend_radius=2,backend_nms=3,upsample=False)
-        self.system = Droid(args)
-        del self.system.frontend
-        self.system.traj_filler = None
+        self.system = DroidBackendRuntime(args)
         self.args = vars(args)
 
     def __call__(self, ids, seeds):
         torch, cv2 = self.torch, self.cv2
-        v, f = self.system.video, self.system.filterx
+        v, f = self.system.video, self.system.encoder
         if len(ids) >= len(v.poses):
             raise ValueError('Keyframe selection exceeds backend buffer')
         with torch.inference_mode():
@@ -75,8 +71,8 @@ class DroidSparseOptimizer:
                                    (self.calib['cx']+.5)*self.w/W-.5,(self.calib['cy']+.5)*self.h/H-.5],device='cuda')
                 inputs=frame[None,:,[2,1,0]].cuda()/255.
                 inputs=inputs.sub_(f.MEAN).div_(f.STDV)
-                gmap=f._MotionFilter__feature_encoder(inputs)
-                net,inp=f._MotionFilter__context_encoder(inputs[:,[0]])
+                gmap=f.feature_encoder(inputs)
+                net,inp=f.context_encoder(inputs[:,[0]])
                 v.append(stamp,frame[0],seed[j],1.,None,intr/8.,gmap,net[0],inp[0],mask)
             torch.cuda.synchronize()
             feature_seconds=time.perf_counter()-start

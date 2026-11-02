@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam3-tracking"
+version = "0.1.0"
+description = "Standalone HaWoR YOLO hand detection and SAM3 point-prompt masks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "huggingface-hub>=0.30",
+  "numpy>=1.26,<2",
+  "opencv-python-headless>=4.10,<5",
+  "PyYAML>=6,<7",
+  "torch>=2.7",
+  "torchvision",
+  "tqdm>=4.66",
+  "ultralytics>=8.3",
+  "wandb>=0.19",
+]
+
+[project.optional-dependencies]
+rle = ["pycocotools>=2.0.8"]
+
+[project.scripts]
+sam3-tracking = "sam3_tracking.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
