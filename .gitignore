@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+outputs/
+cache/
+weights/*
+!weights/README.md
+*.pt
+*.pth
+*.ckpt
+*.npz
+data/manifests/train/*.json

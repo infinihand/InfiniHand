@@ -1,0 +1,13 @@
+{
+  "checkpoints": {
+    "stage1": {
+      "path": "/path/to/weights/stage1.pt"
+    },
+    "stage2": {
+      "path": "/path/to/weights/stage2.pt"
+    },
+    "mask": {
+      "path": "/path/to/weights/mask.pt"
+    }
+  }
+}

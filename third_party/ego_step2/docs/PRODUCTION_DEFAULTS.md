@@ -1,0 +1,51 @@
+# SAM3 configuration reference
+
+Defaults in `configs/default.yaml`. InfiniHand sets output FPS to the input video FPS and disables standalone visualization and experiment logging.
+
+| Setting | Default |
+|---|---|
+| `output_fps` | `10.0` |
+| `jpg_quality` | `90` |
+| `max_frames` | `0` |
+| `detector_confidence` | `0.2` |
+| `detector_batch_size` | `16` |
+| `detector_imgsz` | `0` |
+| `sam3_input_max_side` | `1008` |
+| `sam3_version` | `sam3` |
+| `sam3_score_thresh` | `0.75` |
+| `sam3_bottom_y2_frac` | `2.0` |
+| `sam3_window_sec` | `5.0` |
+| `sam3_point_expand` | `1.1` |
+| `sam3_prompt_geometry` | `box_below` |
+| `sam3_neg_below_count` | `5` |
+| `sam3_neg_below_frac` | `0.05` |
+| `sam3_output_thresh` | `0.15` |
+| `sam3_default_output_prob_thresh` | `0.15` |
+| `sam3_prompt_text` | `hand` |
+| `sam3_tracking_mode` | `joint` |
+| `sam3_init_mode` | `point` |
+| `sam3_propagation_scheme` | `single_anchor` |
+| `sam3_mask_archive` | `npz` |
+| `sam3_seed_window_ratio_min` | `0.5` |
+| `sam3_ego_gate_enabled` | `True` |
+| `ego_gate_size_ratio_min` | `0.045` |
+| `ego_gate_size_ratio_good` | `0.187` |
+| `ego_gate_bottom_ratio_min` | `0.35` |
+| `ego_gate_bottom_ratio_good` | `0.85` |
+| `ego_gate_area_weight` | `0.7` |
+| `ego_gate_bottom_weight` | `0.3` |
+| `ego_gate_keep_tau` | `0.75` |
+| `ego_gate_flag_tau` | `0.35` |
+| `ego_gate_margin_tau` | `1.0` |
+| `sam3_exec_micro_opts` | `False` |
+| `sam3_offload_video` | `False` |
+| `sam3_offload_state` | `False` |
+| `sam3_chunk_trim` | `False` |
+| `sam3_dedup_pos_enc` | `False` |
+| `sam3_close_empty_cache` | `False` |
+| `write_visualization` | `True` |
+| `visualization_alpha` | `0.45` |
+| `contact_frames` | `24` |
+| `stage_events` | `False` |
+| `wandb_project` | `hand-detection-sam3-mask` |
+| `wandb_mode` | `offline` |
