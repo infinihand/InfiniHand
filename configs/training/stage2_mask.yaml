@@ -11,11 +11,9 @@ dataset_jsons:
 - /path/to/data/manifests/train/egostandard.json
 - /path/to/data/manifests/train/egostandard_body.json
 - /path/to/data/manifests/train/egoverse.json
-- /path/to/data/manifests/train/genhumanego.json
 - /path/to/data/manifests/train/hot3d.json
 - /path/to/data/manifests/train/h2o3d.json
 - /path/to/data/manifests/train/ho3d.json
-- /path/to/data/manifests/train/hoi4d.json
 dataset_len_train: 10000
 dataset_retry_attempts: 8
 dataset_sampling_version: ego_data_v2_sqrt_frames
@@ -78,11 +76,9 @@ sampling_weights:
     egostandard: 1
     egostandard_body: 1
     egoverse: 1
-    genhumanego: 1
     hot3d: 10
     h2o3d: 1
     ho3d: 1
-    hoi4d: 1
 save_final_checkpoint: true
 stage1_loss_weight: 1.0
 step_memory_enabled: true
