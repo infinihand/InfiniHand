@@ -13,7 +13,7 @@ InfiniHand estimates hand masks, camera-space MANO parameters and camera motion 
 ![InfiniHand pipeline](assets/method.png)
 
 - **Stage I:** train mask and MANO reconstruction branches on short clips.
-- **Stage II:** train temporal mask, MANO and camera branches on longer clips, then merge their weights for inference.
+- **Stage II:** continue training the MANO and mask branches on longer clips and train the camera head. The camera head is trained only in Stage II.
 - **Inference:** predict masks, hands and cameras, optionally refine cameras with sparse BA, and export camera-space and world-space geometry.
 
 Training (`infinihand.train`) and inference (`infinihand.infer`) have separate entry points and share the model definitions.
@@ -44,7 +44,7 @@ All external paths in the configurations are `/path/to/...` placeholders. Replac
 
 ## Inference
 
-Download the merged checkpoint from [Hugging Face](https://huggingface.co/cskrren/InfiniHand):
+Download the inference checkpoint from [Hugging Face](https://huggingface.co/cskrren/InfiniHand):
 
 ```bash
 mkdir -p /path/to/weights
@@ -78,7 +78,7 @@ Prepare unified scene manifests and set `dataset_jsons` and `sampling_weights` i
 
 ### Training Stage I
 
-Stage I uses four-frame clips. Train the MANO branch, then initialize the mask branch from the same complete base written by that run:
+Stage I trains the MANO and mask branches on four-frame clips. Train the MANO branch, then initialize the mask branch from the same complete base written by that run:
 
 ```bash
 python -m infinihand.train --config /path/to/InfiniHand/configs/training/stage1_mano.yaml \
@@ -88,19 +88,9 @@ python -m infinihand.train --config /path/to/InfiniHand/configs/training/stage1_
   --set output_dir=/path/to/runs/stage1_mask
 ```
 
-Compose the Stage I model:
-
-```bash
-python -m infinihand.export_weights \
-  --base /path/to/runs/stage1_mano/initial_model.pt \
-  --checkpoint /path/to/runs/stage1_mano/last.pt \
-  --checkpoint /path/to/runs/stage1_mask/last.pt \
-  --output /path/to/weights/stage1.pt
-```
-
 ### Training Stage II
 
-Stage II uses 36-frame clips. Initialize each branch from the complete Stage I model:
+Stage II uses 36-frame clips to continue training the MANO and mask branches and to train the camera head. MANO and mask each have Stage I and Stage II configurations; the camera head has only a Stage II configuration. Set `finetune_checkpoint` to a complete Stage I checkpoint containing the trained MANO and mask weights:
 
 ```bash
 for task in mano mask camera; do
@@ -111,14 +101,21 @@ for task in mano mask camera; do
 done
 ```
 
-Export the merged inference checkpoint:
-
-```bash
-python -m infinihand.export_weights --base /path/to/weights/stage1.pt \
-  --checkpoint /path/to/runs/stage2_mano/last.pt \
-  --checkpoint /path/to/runs/stage2_mask/last.pt \
-  --checkpoint /path/to/runs/stage2_camera/last.pt \
-  --exclude-mano-assets --output /path/to/weights/inifinihand_v1.pt
-```
-
 Batch size is per process; global batch size follows the number of processes. For distributed training, replace `python -m infinihand.train` with `torchrun --standalone --nproc_per_node=8 -m infinihand.train`. Use `--check-config` to validate training manifests and initialization paths before launching. Resume by supplying the run's complete base as `finetune_checkpoint` and its partial update as `resume_checkpoint`; the trainer restores optimizer and scheduler state.
+
+## Acknowledgement
+
+We thank the authors of [LingBot-Map](https://github.com/Robbyant/lingbot-map), [WiLoR](https://github.com/rolpotamias/WiLoR), [HaWoR](https://github.com/ThunderVVV/HaWoR), and [ViDiHand](https://github.com/NTUYWANG103/ViDiHand) for their excellent work and contributions to the research community.
+
+## Contact and citation
+
+For questions, contact [Kerui Ren](mailto:renkerui@sjtu.edu.cn). Please cite our paper:
+
+```bibtex
+@article{ren2026infinihand,
+  title={InfiniHand: Streaming World-Space Hand Motion Estimation from Egocentric Video},
+  author={Ren, Kerui and Song, Kaiwen and Zhao, Weiguang and Wang, Yuxi and Liu, Yufei and Dai, Bo and Guo, Haoyu and Shen, Chunhua and Yu, Mulin and Lu, Tao and others},
+  journal={arXiv preprint arXiv:2609.35743},
+  year={2026}
+}
+```
