@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
-from .sparse_ba import SparseBinaryBA, apply_pose_corrections, validate_poses, reject_bad_updates
+from .sparse_ba import apply_pose_corrections, validate_poses, reject_bad_updates
 
 
 def triangulate_depth(frames, boxes, ids, seeds, calib, height=384, width=536):
@@ -89,7 +89,7 @@ class DroidSparseOptimizer:
         with torch.inference_mode():
             start = time.perf_counter()
             v.counter.value = 0
-            # No stale depth, recurrent state, sensor priors, or masks across pools.
+            # Reset depth, sensor priors, and masks before optimization.
             v.disps.fill_(1);v.disps_sens.zero_();v.disps_up.zero_();v.dirty.zero_()
             self.system.backend.errors.clear()
             w2c = np.linalg.inv(seeds)
@@ -170,16 +170,13 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--intrinsics',type=Path,required=True)
     p.add_argument('--weights',type=Path,required=True)
-    p.add_argument('--mode',choices=['binary','fixed'],default='fixed')
-    p.add_argument('--pool-capacity',type=int,default=160)
     p.add_argument('--stride',type=int,default=10)
-    p.add_argument('--no-flush',action='store_true')
     p.add_argument('--height',type=int,default=384);p.add_argument('--width',type=int,default=536)
     p.add_argument('--depth-init', choices=['none', 'sparse'], default='none')
     p.add_argument('--no-reject-outliers', action='store_true', help='Disable BA update rejection for ablations')
     a=p.parse_args()
-    if a.stride<1 or a.pool_capacity<a.stride:
-        p.error('Require pool-capacity >= stride >= 1')
+    if a.stride<1:
+        p.error('Require stride >= 1')
     if (a.output/'BA_SUCCESS.json').exists():
         raise FileExistsError('Refusing to overwrite a completed BA result')
     with np.load(a.output/'ba_inputs.npz') as x:
@@ -188,24 +185,16 @@ def main():
         raise ValueError('Need >=2 frames and finite boxes [T,2,4]')
     calib=json.loads(a.intrinsics.read_text())
     ids=np.unique(np.r_[np.arange(0,len(poses),a.stride),len(poses)-1]).astype(int)
-    maxkeys=len(ids) if a.mode=='fixed' else len(range(0,a.pool_capacity+2,a.stride))
-    backend=DroidSparseOptimizer(a.output/'frames',calib,boxes,a.weights,maxkeys,(a.height,a.width),depth_init=a.depth_init,reject_outliers=not a.no_reject_outliers)
-    if a.mode=='binary':
-        controller=SparseBinaryBA(backend,a.pool_capacity,a.stride)
-        for pose in poses:
-            controller.append(pose)
-        refined=controller.finish(flush=not a.no_flush)
-        events=controller.events
-    else:
-        keyposes,diagnostics=backend(ids.tolist(),poses[ids])
-        keyposes=poses[ids[0]]@np.linalg.inv(keyposes[0])@keyposes
-        refined=apply_pose_corrections(poses,ids,keyposes)
-        events=[dict(reason='fixed',selected=ids.tolist(),backend=diagnostics)]
+    backend=DroidSparseOptimizer(a.output/'frames',calib,boxes,a.weights,len(ids),(a.height,a.width),depth_init=a.depth_init,reject_outliers=not a.no_reject_outliers)
+    keyposes,diagnostics=backend(ids.tolist(),poses[ids])
+    keyposes=poses[ids[0]]@np.linalg.inv(keyposes[0])@keyposes
+    refined=apply_pose_corrections(poses,ids,keyposes)
+    events=[dict(reason='fixed',selected=ids.tolist(),backend=diagnostics)]
     np.savez_compressed(a.output/'trajectory.npz',poses=refined,initial_poses=poses,
                         corrections=refined@np.linalg.inv(poses))
-    report=dict(depth_init=a.depth_init,reject_outliers=not a.no_reject_outliers,mode=a.mode,pool_capacity=a.pool_capacity,stride=a.stride,frames=len(poses),
-        paper='https://arxiv.org/abs/2609.35743',selection='chronological pool indices starting at oldest' if a.mode=='binary' else 'original frame index stride plus final frame',
-        flush=not a.no_flush,events=events,ba_calls=len(events),
+    report=dict(depth_init=a.depth_init,reject_outliers=not a.no_reject_outliers,mode='fixed',stride=a.stride,frames=len(poses),
+        selection='original frame index stride plus final frame',
+        events=events,ba_calls=len(events),
         world_gauge='preserve first selected input c2w at each BA call',metric_scale_recovered=False,
         interpolation='SLERP rotation and linear translation of left corrections; hold endpoint correction outside keyframe interval',
         scheduling='sequential backend replay after feed-forward inference, not asynchronous',
@@ -213,7 +202,7 @@ def main():
         frontend=False,motion_filter=False,gt_used=False)
     (a.output/'BA_REPORT.json').write_text(json.dumps(report,indent=2,allow_nan=False))
     (a.output/'BA_SUCCESS.json').write_text(json.dumps(dict(status='complete',ba_calls=len(events),frames=len(poses)),indent=2))
-    print(json.dumps(dict(ba_calls=len(events),frames=len(poses),mode=a.mode)))
+    print(json.dumps(dict(ba_calls=len(events),frames=len(poses),mode='fixed')))
 
 if __name__=='__main__':
     main()

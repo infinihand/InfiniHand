@@ -1,48 +1,6 @@
-"""Paper Appendix C: chronological binary keyframe pool and c2w refinement.
-
-This module has no CUDA/DROID imports. Optimization is injected as a callable.
-"""
-from dataclasses import dataclass
+"""Camera-pose validation, dense correction interpolation, and BA update rejection."""
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
-
-
-@dataclass
-class Entry:
-    frame_id: int
-    retained: bool = False
-
-
-class BinaryKeyframePool:
-    """Select first, optimize successfully, then toggle and evict (Eq. 34/35)."""
-    def __init__(self, capacity=160, stride=20):
-        if not isinstance(capacity, int) or not isinstance(stride, int) or stride < 1 or capacity < stride:
-            raise ValueError('Require integer capacity >= stride >= 1 (at least two BA frames at trigger)')
-        self.capacity, self.stride = capacity, stride
-        self.entries = []
-        self.last_id = -1
-
-    def append(self, frame_id):
-        if frame_id <= self.last_id:
-            raise ValueError('Frames must arrive once in strictly increasing temporal order')
-        self.entries.append(Entry(int(frame_id)))
-        self.last_id = int(frame_id)
-        return len(self.entries) > self.capacity
-
-    def selected(self):
-        return [x.frame_id for x in self.entries[::self.stride]]
-
-    def commit(self, selected):
-        if list(selected) != self.selected():
-            raise ValueError('Selection changed before commit')
-        selected = set(selected)
-        for entry in self.entries:
-            if entry.frame_id in selected:
-                entry.retained = not entry.retained
-        self.entries = [x for x in self.entries if x.retained]
-
-    def state(self):
-        return [[x.frame_id, int(x.retained)] for x in self.entries]
 
 
 def validate_poses(poses):
@@ -111,50 +69,3 @@ def reject_bad_updates(seeds, refined, weight_history=()):
         low_confidence_indices=np.flatnonzero(low_confidence).tolist(),
         translation_limit_m=translation_limit, rotation_limit_deg=rotation_limit,
         translation_updates_m=distance.tolist(), rotation_updates_deg=angle.tolist())
-
-
-class SparseBinaryBA:
-    """Incremental pool; the optimizer receives selected IDs and current c2w poses.
-
-    No frames/poses are popped until a successful finite BA result. The first
-    selected seed fixes the world gauge, so repeated calls do not reset the world.
-    """
-    def __init__(self, optimizer, capacity=160, stride=20):
-        self.pool = BinaryKeyframePool(capacity, stride)
-        self.optimizer = optimizer
-        self.raw, self.poses, self.events = [], [], []
-        self.carry = np.eye(4)
-
-    def append(self, pose):
-        pose = validate_poses(np.asarray(pose)[None])[0]
-        self.raw.append(pose.copy())
-        self.poses.append(self.carry @ pose)
-        if self.pool.append(len(self.raw)-1):
-            self.refine('capacity')
-
-    def refine(self, reason='flush'):
-        ids = self.pool.selected()
-        if len(ids) < 2:
-            return False
-        before = self.pool.state()
-        seed = np.asarray(self.poses)[ids].copy()
-        refined, diagnostics = self.optimizer(ids, seed.copy())
-        refined = validate_poses(refined)
-        if len(refined) != len(ids):
-            raise ValueError('Backend returned wrong keyframe count')
-        # A monocular backend has a free rigid gauge. Preserve the input world.
-        refined = seed[0] @ np.linalg.inv(refined[0]) @ refined
-        start = ids[0]
-        updated = apply_pose_corrections(np.asarray(self.poses)[start:], np.asarray(ids)-start, refined)
-        self.poses[start:] = list(updated)
-        self.carry = self.poses[-1] @ np.linalg.inv(self.raw[-1])
-        self.pool.commit(ids)
-        self.events.append(dict(reason=reason,at_frame=len(self.raw)-1,selected=ids,
-                                pool_before=before,pool_after=self.pool.state(),backend=diagnostics))
-        return True
-
-    def finish(self, flush=True):
-        # Optional end-of-video flush; uses the same pool-index stride and toggle.
-        if flush:
-            self.refine('flush')
-        return validate_poses(np.asarray(self.poses))
