@@ -5,11 +5,13 @@ dataset_sampling_version: ego_data_v2_sqrt_frames
 sampling_weights:
   ego_data_v2_sqrt_frames:
     arctic: 10
+    dexycb: 1
     egopro: 1
     egopro_body: 1
     egostandard: 1
     egostandard_body: 1
     egoverse: 1
+    genhumanego: 1
     hot3d: 10
 sampling_split_weights:
   train: 1
@@ -71,11 +73,13 @@ stage2_coordinate_protocol: opencv_c2w_first_camera_metric_no_scale_alignment
 camera_joint_target_space: image_camera
 dataset_jsons:
 - /path/to/data/manifests/train/arctic.json
+- /path/to/data/manifests/train/dexycb.json
 - /path/to/data/manifests/train/egopro.json
 - /path/to/data/manifests/train/egopro_body.json
 - /path/to/data/manifests/train/egostandard.json
 - /path/to/data/manifests/train/egostandard_body.json
 - /path/to/data/manifests/train/egoverse.json
+- /path/to/data/manifests/train/genhumanego.json
 - /path/to/data/manifests/train/hot3d.json
 loss_outlier_bootstrap_steps: 1000
 loss_outlier_bootstrap_threshold: 10.0

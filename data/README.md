@@ -2,13 +2,14 @@
 
 ## Datasets
 
-| Stage | Branch | Datasets | Clip length |
-|---|---|---|---|
-| Stage I | MANO, Mask | ARCTIC, EgoPro, EgoStandard, H2O, HOT3D, OakInk2 | 4 frames |
-| Stage II | MANO, Mask | ARCTIC, EgoPro, EgoStandard, H2O, HOT3D, OakInk2 | 36 frames |
-| Stage II | Camera | ARCTIC, EgoPro, EgoPro Body, EgoStandard, EgoStandard Body, EgoVerse, HOT3D | 36 frames |
+| Data group | Datasets | Training use |
+|---|---|---|
+| With camera poses | ARCTIC, DexYCB, EgoPro, EgoPro Body, EgoStandard, EgoStandard Body, EgoVerse, Gen-HumanEgo, HOT3D | Stage I/II MANO and Mask; Stage II Camera |
+| Without camera poses | H2O3D, HO3D, HOI4D | Stage I/II MANO and Mask |
 
-These datasets are selected by `dataset_jsons` in [the training configurations](../configs/training/). MANO/Mask use `egodemo_egopro_standard.json` and `egodemo_egostandard.json` for EgoPro and EgoStandard; Camera uses separate standard/body manifests.
+Stage I uses 4-frame clips and Stage II uses 36-frame clips. MANO/Mask use all hand-annotated training sources; only Camera requires valid camera poses. Camera supervision uses frames with `camera_valid: true` and a valid `camera_to_world`, rather than treating missing poses as identity targets. Dataset selection is configured in [the training configurations](../configs/training/).
+
+Evaluation uses the separate ARCTIC, HOT3D, EgoDex and HOI4D test manifests. EgoDex is evaluation-only in this data collection.
 
 ## Preprocessing
 
@@ -23,16 +24,17 @@ These datasets are selected by `dataset_jsons` in [the training configurations](
 ├── manifests/
 │   └── train/
 │       ├── arctic.json
-│       ├── egodemo_egopro_standard.json
-│       ├── egodemo_egostandard.json
-│       ├── h2o.json
-│       ├── hot3d.json
-│       ├── oakink2.json
+│       ├── dexycb.json
 │       ├── egopro.json
 │       ├── egopro_body.json
 │       ├── egostandard.json
 │       ├── egostandard_body.json
-│       └── egoverse.json
+│       ├── egoverse.json
+│       ├── genhumanego.json
+│       ├── hot3d.json
+│       ├── h2o3d.json
+│       ├── ho3d.json
+│       └── hoi4d.json
 └── scenes/
     └── <dataset>/<scene>/
         ├── metadata.json

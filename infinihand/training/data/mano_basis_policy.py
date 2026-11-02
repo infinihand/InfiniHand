@@ -4,7 +4,7 @@ POLICY_VERSION = "dataset_source_v1_20261015"
 DATASET_BASES = {
     "arctic": "A", "dexycb": "A", "hoi4d": "A", "ho3d": "A",
     "hot3d": "B", "h2o3d": "B", "egoverse": "B", "egodex": "B",
-    "egopro": "B", "egopro_body": "B",
+    "egopro": "B", "egopro_body": "B", "genhumanego": "B",
     "egostandard": "B", "egostandard_body": "B",
 }
 

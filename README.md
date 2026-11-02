@@ -49,7 +49,7 @@ Download the inference checkpoint from [Hugging Face](https://huggingface.co/csk
 ```bash
 mkdir -p /path/to/weights
 curl -L https://huggingface.co/cskrren/InfiniHand/resolve/main/inifinihand_v1.pt \
-  -o /path/to/weights/inifinihand_v1.pt
+  -o /path/to/weights/infinihand_v1.pt
 ```
 
 Edit `configs/infinihand_v1.json`, including `mano_model_path`. The checkpoint contains the learned backbone and Mask/MANO/Camera weights; licensed MANO assets are loaded separately. Prepare intrinsics for the original video resolution:
@@ -64,7 +64,7 @@ Run feed-forward inference with the learned mask head:
 python -m infinihand.infer \
   --video /path/to/video.mp4 --intrinsics /path/to/intrinsics.json \
   --config /path/to/InfiniHand/configs/infinihand_v1.json \
-  --checkpoint /path/to/weights/inifinihand_v1.pt \
+  --checkpoint /path/to/weights/infinihand_v1.pt \
   --mask-source head --no-ba --output /path/to/outputs/demo
 ```
 
@@ -102,6 +102,17 @@ done
 ```
 
 Batch size is per process; global batch size follows the number of processes. For distributed training, replace `python -m infinihand.train` with `torchrun --standalone --nproc_per_node=8 -m infinihand.train`. Use `--check-config` to validate training manifests and initialization paths before launching. Resume by supplying the run's complete base as `finetune_checkpoint` and its partial update as `resume_checkpoint`; the trainer restores optimizer and scheduler state.
+
+## Evaluation
+
+Edit `configs/evaluation/camera_space.yaml` to set the single inference checkpoint, model configuration, and test manifests for ARCTIC, HOT3D, EgoDex and HOI4D. Evaluation uses predicted mask boxes and reports camera-space joint errors and coverage for each scene.
+
+```bash
+python -m infinihand.evaluation.camera_space \
+  --config /path/to/InfiniHand/configs/evaluation/camera_space.yaml
+```
+
+Use `--dataset arctic` to select one dataset, `--scene SCENE_NAME` for one scene, or `--check-config` to validate the configuration before loading the model.
 
 ## Acknowledgement
 
