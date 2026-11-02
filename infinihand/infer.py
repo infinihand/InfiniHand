@@ -698,10 +698,12 @@ def parser():
     p.add_argument('--ba-python', default=sys.executable)
     p.add_argument('--droid-weights', type=Path, default=Path('/path/to/weights/droid.pth'))
     p.add_argument('--no-ba', action='store_true')
-    p.add_argument('--ba-stride', type=int, default=20)
-    p.add_argument('--ba-mode', choices=['binary', 'fixed'], default='binary')
+    p.add_argument('--ba-stride', type=int, default=10)
+    p.add_argument('--ba-mode', choices=['binary', 'fixed'], default='fixed')
     p.add_argument('--ba-pool-capacity', type=int, default=160)
     p.add_argument('--ba-no-flush', action='store_true')
+    p.add_argument('--ba-depth-init', choices=['none', 'sparse'], default='none')
+    p.add_argument('--ba-no-reject-outliers', action='store_true', help='Disable update rejection for ablations')
     p.add_argument('--max-frames', type=int, default=8192)
     return p
 
@@ -795,14 +797,14 @@ def main():
     del out, world, model, images, intr
     torch.cuda.empty_cache()
     if not a.no_ba:
-        subprocess.run([a.ba_python, '-m', 'infinihand.sparse_ba_backend', '--output', str(a.output.resolve()), '--intrinsics', str(a.intrinsics.resolve()), '--weights', str(a.droid_weights.resolve()), '--stride', str(a.ba_stride), '--mode', a.ba_mode, '--pool-capacity', str(a.ba_pool_capacity)] + (['--no-flush'] if a.ba_no_flush else []), cwd=ROOT, check=True)
+        subprocess.run([a.ba_python, '-m', 'infinihand.sparse_ba_backend', '--output', str(a.output.resolve()), '--intrinsics', str(a.intrinsics.resolve()), '--weights', str(a.droid_weights.resolve()), '--stride', str(a.ba_stride), '--mode', a.ba_mode, '--pool-capacity', str(a.ba_pool_capacity), '--depth-init', a.ba_depth_init] + (['--no-reject-outliers'] if a.ba_no_reject_outliers else []) + (['--no-flush'] if a.ba_no_flush else []), cwd=ROOT, check=True)
         poses = np.load(a.output / 'trajectory.npz')['poses']
     if not np.isfinite(poses).all():
         raise ValueError('Non-finite trajectory')
     rot = poses[:, :3, :3]
     trans = poses[:, :3, 3]
     np.savez_compressed(a.output / 'world_space.npz', camera_to_world=poses, world_joints=np.einsum('tij,thnj->thni', rot, arr['camera_joints']) + trans[:, None, None, :], world_vertices=np.einsum('tij,thnj->thni', rot, arr['camera_vertices']) + trans[:, None, None, :], world_global_orient=rot[:, None] @ arr['camera_global_orient'], world_translation=np.einsum('tij,thj->thi', rot, arr['camera_translation']) + trans[:, None, :], hand_pose=arr['hand_pose'], betas=arr['betas'], valid=valid)
-    receipt = dict(ba_mode=None if a.no_ba else a.ba_mode, ba_pool_capacity=a.ba_pool_capacity, status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
+    receipt = dict(ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else a.ba_mode, ba_pool_capacity=a.ba_pool_capacity, status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
     (a.output / 'SUCCESS.json').write_text(json.dumps(receipt, indent=2))
     print(json.dumps(receipt, indent=2))
 if __name__ == '__main__':

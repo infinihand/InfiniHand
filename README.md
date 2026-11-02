@@ -58,17 +58,26 @@ Edit `configs/infinihand_v1.json`, including `mano_model_path`. The checkpoint c
 {"fx": 700.0, "fy": 700.0, "cx": 640.0, "cy": 360.0, "image_width": 1280, "image_height": 720}
 ```
 
-Run feed-forward inference with the learned mask head:
+Run inference with the learned mask head and guarded BA:
 
 ```bash
 python -m infinihand.infer \
   --video /path/to/video.mp4 --intrinsics /path/to/intrinsics.json \
   --config /path/to/InfiniHand/configs/infinihand_v1.json \
   --checkpoint /path/to/weights/infinihand_v1.pt \
-  --mask-source base --no-ba --output /path/to/outputs/demo
+  --mask-source base --droid-weights /path/to/weights/droid.pth \
+  --output /path/to/outputs/demo
 ```
 
-To enable sparse BA, omit `--no-ba` and supply `--droid-weights /path/to/weights/droid.pth`. The default BA mode uses a binary keyframe pool; `--ba-mode fixed` selects fixed-stride refinement. Optional SAM3 tracking uses `--mask-source sam3-tracking` and the assets described in [the SAM3 setup guide](third_party/sam3_tracking/README.md).
+Use `--no-ba` for feed-forward-only inference. The BA defaults are `--ba-mode fixed --ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second.
+
+Use `--ba-depth-init sparse` to initialize inverse depth from RGB feature matches triangulated with Camera head poses and the supplied intrinsics. This uses no ground-truth poses or depth, inherits the predicted camera scale, and leaves depth free to change during BA. The default `none` uses constant inverse-depth initialization, also optimized by BA.
+
+Update rejection uses no ground truth. A keyframe falls back to its input camera pose if its translation correction exceeds `max(0.1 m, 5 × median correction)`, its rotation correction exceeds `max(10°, 5 × median correction)`, or its outgoing match weight is below 1% of the keyframe median in at least two of the first three BA iterations. The first pose anchors the world frame. Dense pose corrections are interpolated after rejected keyframes are restored. This guards against large failures but does not guarantee improved accuracy on every scene. `--ba-no-reject-outliers` disables it for ablations. `BA_REPORT.json` records rejected frames and thresholds.
+
+The experimental `--ba-mode binary --ba-pool-capacity 160 --ba-stride 20` uses the Appendix C binary keyframe pool. Here the stride applies to **pool entries**, which can have unequal gaps in original frame indices. The pool triggers when capacity is exceeded and runs repeated BA updates; a final flush is enabled unless `--ba-no-flush` is set. This differs from full-sequence fixed-stride BA in graph size, optimization schedule, and propagated corrections, so comparable accuracy is not assured.
+
+Optional SAM3 tracking uses `--mask-source sam3-tracking` and the assets described in [the SAM3 setup guide](third_party/sam3_tracking/README.md).
 
 Outputs include `camera_space.npz`, `world_space.npz` and `SUCCESS.json`; BA also writes `trajectory.npz`. Hand slots are right, left. Use a fresh output directory. Each invocation accepts 4–8192 frames; BA runs after feed-forward prediction. World coordinates use the predicted camera scale.
 

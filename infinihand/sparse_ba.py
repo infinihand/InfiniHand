@@ -83,6 +83,36 @@ def apply_pose_corrections(poses, ids, refined):
     return validate_poses(result)
 
 
+def reject_bad_updates(seeds, refined, weight_history=()):
+    """Reject implausible BA updates without ground truth; not an accuracy guarantee."""
+    seeds, refined = validate_poses(seeds), validate_poses(refined)
+    if seeds.shape != refined.shape:
+        raise ValueError('Seed and refined pose shapes must match')
+    refined = seeds[0] @ np.linalg.inv(refined[0]) @ refined
+    distance = np.linalg.norm(refined[:, :3, 3] - seeds[:, :3, 3], axis=-1)
+    angle = np.degrees(Rotation.from_matrix(
+        seeds[:, :3, :3].transpose(0, 2, 1) @ refined[:, :3, :3]).magnitude())
+    translation_limit = max(.1, 5 * float(np.median(distance)))
+    rotation_limit = max(10., 5 * float(np.median(angle)))
+    pose_bad = (distance > translation_limit) | (angle > rotation_limit)
+    low_confidence = np.zeros(len(seeds), dtype=bool)
+    weights = np.asarray(weight_history, dtype=float)
+    if weights.size:
+        if weights.ndim != 2 or weights.shape[1] != len(seeds) or not np.isfinite(weights).all():
+            raise ValueError('Expected finite per-iteration keyframe weights')
+        ratios = weights[:3] / np.maximum(np.median(weights[:3], axis=1, keepdims=True), 1e-9)
+        low_confidence = (ratios < .01).sum(axis=0) >= 2
+    bad = pose_bad | low_confidence
+    bad[0] = False  # The first input pose defines the fixed world gauge.
+    result = refined.copy()
+    result[bad] = seeds[bad]
+    return result, dict(rejected_indices=np.flatnonzero(bad).tolist(),
+        pose_rejected_indices=np.flatnonzero(pose_bad).tolist(),
+        low_confidence_indices=np.flatnonzero(low_confidence).tolist(),
+        translation_limit_m=translation_limit, rotation_limit_deg=rotation_limit,
+        translation_updates_m=distance.tolist(), rotation_updates_deg=angle.tolist())
+
+
 class SparseBinaryBA:
     """Incremental pool; the optimizer receives selected IDs and current c2w poses.
 
