@@ -899,7 +899,10 @@ class LingBotMapBackbone(nn.Module):
             if torch.is_tensor(value)
         )
 
-    def _camera_kv_cache_bytes(self) -> int:
+    def _camera_kv_cache_bytes(self, *, include_deferred: bool = False) -> int:
+        if not self.lingbot_enable_camera_head and not include_deferred:
+            # A deferred inference head owns this cache on another CUDA stream.
+            return 0
         camera_head = getattr(self.model, "camera_head", None)
         cache = getattr(camera_head, "kv_cache", None)
         if not isinstance(cache, list):

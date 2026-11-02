@@ -345,7 +345,7 @@ class ViT(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
-    def forward_features(self, x):
+    def forward_features(self, x, spatial_only=False):
         B, C, H, W = x.shape
         x, (Hp, Wp) = self.patch_embed(x)
   
@@ -369,6 +369,12 @@ class ViT(nn.Module):
                 x = blk(x)
 
         x = self.last_norm(x)
+        if spatial_only:
+            # InfiniHand consumes only spatial features; auxiliary WiLoR predictions
+            # are unused and contain host-created indices that prevent graph capture.
+            img_feat = x[:, 2+(self.cfg.MANO.NUM_HAND_JOINTS + 1):].reshape(B, Hp, Wp, -1).permute(0, 3, 1, 2)
+            return None, None, None, img_feat
+
         
         
         pose_feat  = x[:, :(self.cfg.MANO.NUM_HAND_JOINTS + 1)]
