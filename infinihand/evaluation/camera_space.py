@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import yaml
 
-from infinihand.models.stage2_streaming_inference_v6 import (
+from infinihand.infer import (
     build_model, run_dual_stream, validate_contract,
 )
 from infinihand.training.data.datasets.unified_hand_dataset import UnifiedHandDataset

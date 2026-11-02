@@ -27,10 +27,6 @@ from .mutual_hand_joint_fusion import (
 )
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_LINGBOTMAP_ROOT = _PROJECT_ROOT / "third_party" / "lingbot-map"
-_WILOR_ROOT = _PROJECT_ROOT / "third_party" / "WiLoR"
-
 
 @dataclass
 class LingBotMapHandConfig:
@@ -104,18 +100,13 @@ class LingBotMapHandConfig:
     camera_scale_log_max: float = 4.0
     freeze_wilor_backbone: bool = True
     wilor_gradient_checkpointing: bool = False
-    hand_feature_provider: str = "dinov2"
+    hand_feature_provider: str = "wilor"
     hand_feature_chunk_size: int = 8
     freeze_hand_feature_provider: bool = True
-    dinov2_input_height: int = 224
-    dinov2_input_width: int = 168
-    sapiens2_root: str = ""
-    sapiens2_arch: str = "sapiens2_1b"
-    sapiens2_ckpt: str = ""
     frozen_backbone_dtype: str = "bfloat16"
     decode_mano: bool = True
     use_gt_boxes_for_mano: bool = True
-    model_variant: str = "legacy"
+    model_variant: str = "mutual_joint_fusion"
     joint_heatmap_range_margin: float = 0.15
     mutual_fusion_num_heads: int = 8
     mutual_fusion_dropout: float = 0.0
@@ -559,7 +550,7 @@ class LingBotMapBackbone(nn.Module):
             enable_point=False,
             enable_local_point=False,
             # Materialize the pretrained depth DPT only long enough to copy
-            # it into the trainable V1 hand-detection branch.
+            # it into the trainable hand-detection branch.
             enable_depth=True,
             enable_track=False,
             enable_stream_inference=self.step_memory_enabled,
@@ -1759,7 +1750,7 @@ class _HaWoRCrossAttention(nn.Module):
         return self.to_out(out)
 
 
-class _HaWoRTransformerDecoderFallback(nn.Module):
+class _HaWoRTransformerDecoder(nn.Module):
     """Fallback matching HaWoR's one-query TransformerDecoder interface."""
 
     def __init__(
@@ -1848,7 +1839,7 @@ class HaWoRQueryMANOHead(nn.Module):
         if camera_mode not in {"weak_perspective", "log_z"}:
             raise ValueError(f"Unsupported MANO camera_mode={camera_mode!r}")
         self.camera_mode = camera_mode
-        TransformerDecoder = _HaWoRTransformerDecoderFallback
+        TransformerDecoder = _HaWoRTransformerDecoder
 
         transformer_args = dict(
             depth=6,
@@ -1915,121 +1906,8 @@ class HaWoRQueryMANOHead(nn.Module):
         return self.decode_hand_token(self.encode_hand_token(context))
 
 
-class CameraMetricScaleHead(nn.Module):
-    """Pi3X-lite metric query over frozen four-view visual context.
-
-    Pi3X uses a learned metric token and a context-only transformer decoder.
-    This lightweight adaptation attends to two frozen summaries per view: the
-    native LingBot scale special token and the mean patch token.  Only this
-    decoder is trainable; the aggregator and native camera head stay frozen.
-    """
-
-    def __init__(
-        self,
-        *,
-        input_dim: int,
-        hidden_dim: int,
-        num_layers: int,
-        num_heads: int,
-        ffn_dim: int,
-        scale_frames: int,
-        log_scale_min: float,
-        log_scale_max: float,
-    ) -> None:
-        super().__init__()
-        if (
-            hidden_dim <= 0
-            or num_layers <= 0
-            or num_heads <= 0
-            or ffn_dim <= 0
-            or scale_frames <= 0
-        ):
-            raise ValueError("camera scale-head dimensions must be positive")
-        if hidden_dim % num_heads != 0:
-            raise ValueError(
-                "camera scale-head hidden_dim must be divisible by num_heads"
-            )
-        if not log_scale_min < log_scale_max:
-            raise ValueError("camera scale-head log bounds must be ordered")
-        self.scale_frames = int(scale_frames)
-        self.log_scale_min = float(log_scale_min)
-        self.log_scale_max = float(log_scale_max)
-        self.context_norm = nn.LayerNorm(input_dim)
-        self.context_projection = nn.Linear(input_dim, hidden_dim)
-        self.context_type_embedding = nn.Parameter(
-            torch.zeros(1, 1, 2, hidden_dim)
-        )
-        self.metric_query = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=ffn_dim,
-            dropout=0.0,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer,
-            num_layers=num_layers,
-            norm=nn.LayerNorm(hidden_dim),
-        )
-        self.output_norm = nn.LayerNorm(hidden_dim)
-        self.output_projection = nn.Linear(hidden_dim, 1)
-        nn.init.normal_(self.metric_query, std=0.02)
-        nn.init.normal_(self.context_type_embedding, std=0.02)
-        # Start close to scale=1 while allowing every decoder layer to receive
-        # a non-zero gradient on the first optimization step.
-        nn.init.normal_(self.output_projection.weight, std=1.0e-3)
-        nn.init.zeros_(self.output_projection.bias)
-
-    def forward(
-        self,
-        aggregated_tokens: List[torch.Tensor],
-        patch_start_idx: int,
-    ) -> Dict[str, torch.Tensor]:
-        if not aggregated_tokens:
-            raise ValueError("camera scale head requires aggregated tokens")
-        if patch_start_idx < 1:
-            raise ValueError("camera scale head requires a scale special token")
-        tokens = aggregated_tokens[-1]
-        frame_count = min(self.scale_frames, int(tokens.shape[1]))
-        if int(tokens.shape[1]) < self.scale_frames:
-            raise ValueError(
-                "camera scale head requires all configured anchor frames: "
-                f"need={self.scale_frames} got={int(tokens.shape[1])}"
-            )
-        if int(tokens.shape[2]) <= patch_start_idx:
-            raise ValueError("camera scale head requires visual patch tokens")
-        # The scale token is the final special token immediately before patches.
-        scale_tokens = tokens[:, :frame_count, patch_start_idx - 1, :].detach()
-        patch_tokens = tokens[:, :frame_count, patch_start_idx:, :].detach()
-        patch_tokens = patch_tokens.float().mean(dim=2)
-        context = torch.stack((scale_tokens.float(), patch_tokens), dim=2)
-        context = self.context_projection(self.context_norm(context))
-        context = context + self.context_type_embedding
-        context = context.reshape(
-            int(context.shape[0]), frame_count * 2, int(context.shape[-1])
-        )
-        query = self.metric_query.expand(int(context.shape[0]), -1, -1)
-        decoded = self.decoder(tgt=query, memory=context)
-        raw_log_scale = self.output_projection(
-            self.output_norm(decoded[:, 0])
-        ).squeeze(-1)
-        log_scale = raw_log_scale.clamp(
-            min=self.log_scale_min, max=self.log_scale_max
-        )
-        return {
-            "pred_camera_log_scale": log_scale,
-            "pred_camera_metric_scale": log_scale.exp(),
-            "pred_camera_scale_context_tokens": log_scale.new_full(
-                (), frame_count * 2
-            ),
-        }
-
-
 class LingBotMapHand(nn.Module):
-    """V3 frontend: V1 DPT hand detection plus V2 mutual-fusion MANO."""
+    """Shared hand and camera model for training and streaming inference."""
 
     def __init__(
         self,
@@ -2077,7 +1955,7 @@ class LingBotMapHand(nn.Module):
             frames_chunk_size=self.cfg.hand_detection_frames_chunk_size,
         )
         # The source belongs to the frozen backbone. The copied branch is the
-        # trainable V1 detector used by V3.
+        # trainable hand detector.
         self.hand_detection_block.requires_grad_(True)
         self.backbone.model.depth_head = None
         self.hand_mask_head = HandMaskHead(self.cfg.hand_detection_dim)
@@ -2209,18 +2087,9 @@ class LingBotMapHand(nn.Module):
             self.cfg.wilor_feature_chunk_size = self.cfg.hand_feature_chunk_size
             return WiLoRHandFeatureProvider(self.cfg)
 
-        from hand_feature_providers import (
-            DINOv2HandFeatureProvider,
-            Sapiens1BHandFeatureProvider,
-        )
-
-        if name in {"dinov2", "dino", "dino_v2"}:
-            return DINOv2HandFeatureProvider(self.cfg, self.backbone.model.aggregator.patch_embed)
-        if name in {"sapiens", "sapiens1.0b", "sapiens1b", "sapiens2_1b"}:
-            return Sapiens1BHandFeatureProvider(self.cfg)
         raise ValueError(
             f"Unsupported hand_feature_provider={self.cfg.hand_feature_provider!r}; "
-            "choose dinov2, sapiens1.0b, or wilor"
+            "the release model uses wilor"
         )
 
     def _build_mano_layers(self) -> None:

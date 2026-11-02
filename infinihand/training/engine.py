@@ -36,7 +36,7 @@ from infinihand.training.data.hand_dataloader import (
     build_hand_dataloader,
     fetch_hand_batch_with_retry,
 )
-from ..models.lingbotmap_hand_v6 import LingBotMapHand, LingBotMapHandConfig
+from ..models.hand_model import LingBotMapHand, LingBotMapHandConfig
 from .losses import LingBotMapHandLoss, axis_angle_to_matrix
 from .rank_step_trace import RankStepTracer, extract_batch_identity
 from .sample_filter import RollingLossThreshold, slice_batch_tree, filtered_sample_backward
@@ -132,11 +132,6 @@ class TrainConfig:
     hand_feature_provider: str = "wilor"
     hand_feature_chunk_size: int = 8
     freeze_hand_feature_provider: bool = False
-    dinov2_input_height: int = 224
-    dinov2_input_width: int = 168
-    sapiens2_root: str = ""
-    sapiens2_arch: str = "sapiens2_1b"
-    sapiens2_ckpt: str = ""
     freeze_wilor_backbone: bool = False
     wilor_gradient_checkpointing: bool = False
     joint_heatmap_range_margin: float = 0.15
@@ -1116,11 +1111,6 @@ def main() -> None:
         hand_feature_provider=cfg.hand_feature_provider,
         hand_feature_chunk_size=cfg.hand_feature_chunk_size,
         freeze_hand_feature_provider=cfg.freeze_hand_feature_provider,
-        dinov2_input_height=cfg.dinov2_input_height,
-        dinov2_input_width=cfg.dinov2_input_width,
-        sapiens2_root=cfg.sapiens2_root,
-        sapiens2_arch=cfg.sapiens2_arch,
-        sapiens2_ckpt=cfg.sapiens2_ckpt,
         decode_mano=True,
         use_gt_boxes_for_mano=not cfg.mano_gradient_to_mask_head,
         model_variant=cfg.model_variant,

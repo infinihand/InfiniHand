@@ -206,7 +206,7 @@ def prepare_wilor_virtual_crops(
             box_width = max(float(box[2] - box[0]), image_w * 1.0e-4)
             box_height = max(float(box[3] - box[1]), image_h * 1.0e-4)
             import torch
-            from infinihand.models.lingbotmap_hand_v6 import (
+            from infinihand.models.hand_model import (
                 expand_to_square_boxes, virtual_crop_camera_from_boxes,
             )
             old_intrinsic = intrinsics[frame_index]

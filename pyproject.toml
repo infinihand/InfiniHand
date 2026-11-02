@@ -14,7 +14,6 @@ infinihand-infer = "infinihand.infer:main"
 infinihand-train = "infinihand.train:main"
 infinihand-export = "infinihand.export_weights:main"
 infinihand-evaluate = "infinihand.evaluation.camera_space:main"
-infinihand-eval-report = "infinihand.evaluation.report:main"
 
 [tool.setuptools.packages.find]
 include = ["infinihand*"]

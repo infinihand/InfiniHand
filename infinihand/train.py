@@ -3,7 +3,7 @@ import argparse,os,sys,tempfile
 from pathlib import Path
 import yaml
 ROOT=Path(__file__).resolve().parents[1]
-PATHS={'metadata_cache_dir','output_dir','ego3r_training_root','wilor_root','dataset_json','preload_manifest_root','finetune_checkpoint','resume_checkpoint','lingbotmap_root','lingbotmap_ckpt','wilor_cfg','wilor_ckpt','sapiens2_root','sapiens2_ckpt'}
+PATHS={'metadata_cache_dir','output_dir','ego3r_training_root','wilor_root','dataset_json','preload_manifest_root','finetune_checkpoint','resume_checkpoint','lingbotmap_root','lingbotmap_ckpt','wilor_cfg','wilor_ckpt'}
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',required=True);p.add_argument('--set',action='append',default=[],metavar='KEY=VALUE');p.add_argument('--check-config',action='store_true');a=p.parse_args()
  payload=yaml.safe_load(Path(a.config).read_text())

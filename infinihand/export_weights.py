@@ -34,7 +34,7 @@ def main():
         update = extract_model_state(torch.load(source, map_location="cpu", weights_only=False))
         base = merge(base, [update])
     if a.exclude_mano_assets:
-        from .model_weights import without_mano_assets
+        from .weights import without_mano_assets
         base = without_mano_assets(base)
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".tmp")
