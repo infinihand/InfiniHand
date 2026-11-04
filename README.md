@@ -45,11 +45,18 @@ All external paths in the configurations are `/path/to/...` placeholders. Replac
 
 ## Inference
 
-Download the inference checkpoint from [Hugging Face](https://huggingface.co/cskrren/InfiniHand):
+Choose an inference checkpoint from [Hugging Face](https://huggingface.co/cskrren/InfiniHand):
+
+| Version | File | Training data |
+|---|---|---|
+| [v1](https://huggingface.co/cskrren/InfiniHand/tree/main/v1) | `infinihand_v1.pt` | Our curated training corpus |
+| [egobench](https://huggingface.co/cskrren/InfiniHand/tree/main/egobench) | `infinihand_egobench.pt` | EgoBench |
+
+Download v1:
 
 ```bash
 mkdir -p /path/to/weights
-curl -L https://huggingface.co/cskrren/InfiniHand/resolve/main/inifinihand_v1.pt \
+curl -L https://huggingface.co/cskrren/InfiniHand/resolve/main/v1/infinihand_v1.pt \
   -o /path/to/weights/infinihand_v1.pt
 ```
 
@@ -176,7 +183,7 @@ Prepare unified scene manifests and set `dataset_jsons` and `sampling_weights` i
 
 ### Training Stage I
 
-Stage I trains the MANO and mask branches on four-frame clips. Train the MANO branch, then initialize the mask branch from the same complete base written by that run:
+The released training configurations use 300,000 steps for Stage I. Stage I trains the MANO and mask branches on four-frame clips. Train the MANO branch, then initialize the mask branch from the same complete base written by that run:
 
 ```bash
 python -m infinihand.train --config /path/to/InfiniHand/configs/training/stage1_mano.yaml \
@@ -188,7 +195,7 @@ python -m infinihand.train --config /path/to/InfiniHand/configs/training/stage1_
 
 ### Training Stage II
 
-Stage II uses 36-frame clips to continue training the MANO and mask branches and to train the camera head. MANO and mask each have Stage I and Stage II configurations; the camera head has only a Stage II configuration. Set `finetune_checkpoint` to a complete Stage I checkpoint containing the trained MANO and mask weights:
+The released training configurations use 100,000 steps for Stage II. Stage II uses 36-frame clips to continue training the MANO and mask branches and to train the camera head. MANO and mask each have Stage I and Stage II configurations; the camera head has only a Stage II configuration. Set `finetune_checkpoint` to a complete Stage I checkpoint containing the trained MANO and mask weights:
 
 ```bash
 for task in mano mask camera; do
