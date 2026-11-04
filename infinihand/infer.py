@@ -805,11 +805,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--video', type=Path, required=True)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument('--video', type=Path)
+    source.add_argument('--dataset-manifest', type=Path, help='Prepared scene manifest; reads RGB and per-frame intrinsics via UnifiedHandDataset')
+    p.add_argument('--scene', help='Exact scene name for dataset inference')
+    p.add_argument('--dataset-fps', type=float, help='Processed-frame FPS fallback only when dataset timestamps are missing')
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--checkpoint', type=Path, required=True, help='Complete weights exported from the current training runs')
     p.add_argument('--config', type=Path, default=ROOT / 'configs/infinihand_v1.json')
-    p.add_argument('--intrinsics', type=Path, required=True, help='JSON: fx,fy,cx,cy,image_width,image_height, in original video pixels')
+    p.add_argument('--intrinsics', type=Path, help='JSON: fx,fy,cx,cy,image_width,image_height, in original video pixels')
     p.add_argument('--mask-source', choices=['base', 'sam3-tracking'], default='base')
     p.add_argument('--mask-threshold', type=float, default=0.9)
     p.add_argument('--sam3-python', default=sys.executable)
@@ -837,7 +841,13 @@ def main():
         raise ValueError('mask threshold must be in (0,1)')
     if not 4 <= a.max_frames <= 8192:
         raise ValueError('max-frames must be between 4 and 8192')
-    required = [a.video, a.intrinsics, a.checkpoint, a.config]
+    if a.video is not None and a.intrinsics is None:
+        raise ValueError('Video inference requires --intrinsics')
+    if a.dataset_manifest is not None and (not a.scene or a.intrinsics is not None):
+        raise ValueError('Dataset inference requires --scene and reads intrinsics from metadata; omit --intrinsics')
+    if a.video is not None and (a.scene is not None or a.dataset_fps is not None):
+        raise ValueError('--scene and --dataset-fps are dataset-only options')
+    required = [a.checkpoint, a.config] + ([a.video, a.intrinsics] if a.video is not None else [a.dataset_manifest])
     if a.ba_stride < 1:
         raise ValueError('Require ba-stride >= 1')
     if a.mask_source == 'sam3-tracking':
@@ -852,26 +862,47 @@ def main():
     D.mkdir(exist_ok=True)
     if list(D.glob('*.png')):
         raise ValueError('Use a fresh output directory to avoid stale frame/mask mixing')
-    Kd = json.loads(a.intrinsics.read_text())
-    cap = cv2.VideoCapture(str(a.video))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not cap.isOpened() or fps <= 0:
-        raise ValueError('Cannot open video or invalid FPS')
-    n = 0
-    while n < a.max_frames:
-        (ok, im) = cap.read()
-        if not ok:
-            break
-        (h, w) = im.shape[:2]
-        if (w, h) != (Kd['image_width'], Kd['image_height']):
-            raise ValueError('Video dimensions differ from intrinsics metadata; explicitly calibrate/rescale before inference')
-        cv2.imwrite(str(D / f'{n:06d}.png'), im)
-        n += 1
-    cap.release()
-    if n < 4:
-        raise ValueError('At least four frames required')
-    if n > 8192:
-        raise ValueError('Maximum supported temporal index is 8192')
+    dataset_data = None
+    if a.dataset_manifest is not None:
+        from .inference_data import load_dataset_input
+        dataset_data = load_dataset_input(a.dataset_manifest, a.scene, a.max_frames, a.dataset_fps)
+        rgb, Ks = dataset_data['images'], dataset_data['intrinsics']
+        n, h, w = rgb.shape[:3]
+        fps = dataset_data['fps']
+        timestamps = dataset_data['timestamps_seconds']
+        if not a.no_ba and not np.allclose(Ks, Ks[:1], rtol=0, atol=1e-5):
+            raise ValueError('Camera BA currently requires constant intrinsics; use --no-ba for this scene with varying intrinsics')
+        K0 = Ks[0]
+        Kd = dict(fx=float(K0[0,0]), fy=float(K0[1,1]), cx=float(K0[0,2]), cy=float(K0[1,2]), image_width=w, image_height=h)
+        a.intrinsics = a.output / 'input_intrinsics.json'
+        a.intrinsics.write_text(json.dumps(Kd, indent=2))
+        for i, im in enumerate(rgb):
+            if not cv2.imwrite(str(D / f'{i:06d}.png'), im[:,:,::-1]):
+                raise IOError('Failed to save dataset RGB frame')
+        np.savez_compressed(a.output / 'input_metadata.npz', intrinsics=Ks,
+                            source_frame_ids=dataset_data['source_frame_ids'], timestamps_seconds=timestamps)
+    else:
+        Kd = json.loads(a.intrinsics.read_text())
+        cap = cv2.VideoCapture(str(a.video))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not cap.isOpened() or fps <= 0:
+            raise ValueError('Cannot open video or invalid FPS')
+        n = 0
+        while n < a.max_frames:
+            (ok, im) = cap.read()
+            if not ok:
+                break
+            (h, w) = im.shape[:2]
+            if (w, h) != (Kd['image_width'], Kd['image_height']):
+                raise ValueError('Video dimensions differ from intrinsics metadata; explicitly calibrate/rescale before inference')
+            cv2.imwrite(str(D / f'{n:06d}.png'), im)
+            n += 1
+        cap.release()
+        if n < 4:
+            raise ValueError('At least four frames required')
+        if n > 8192:
+            raise ValueError('Maximum supported temporal index is 8192')
+        timestamps = np.arange(n, dtype=np.float64) / fps
     boxes = np.zeros((n, 2, 4), np.float32)
     valid = np.zeros((n, 2), bool)
     if a.mask_source == 'sam3-tracking':
@@ -898,10 +929,13 @@ def main():
     graph_setup = prepare_cuda_graphs(model) if a.cuda_graphs else 0.0
     images = np.stack([cv2.resize(cv2.imread(str(D / f'{i:06d}.png')), (518, 378))[:, :, ::-1] for i in range(n)])
     images = torch.from_numpy(np.ascontiguousarray(images)).permute(0, 3, 1, 2).float().div_(255).unsqueeze(0).cuda()
-    K = np.array([[Kd['fx'], 0, Kd['cx']], [0, Kd['fy'], Kd['cy']], [0, 0, 1]], np.float32)
-    K[0] *= 518 / w
-    K[1] *= 378 / h
-    intr = torch.from_numpy(K).view(1, 1, 3, 3).expand(1, n, 3, 3).cuda()
+    if dataset_data is None:
+        Ks = np.broadcast_to(np.array([[Kd['fx'], 0, Kd['cx']], [0, Kd['fy'], Kd['cy']], [0, 0, 1]], np.float32), (n,3,3)).copy()
+    else:
+        Ks = dataset_data['intrinsics'].copy()
+    Ks[:,0] *= 518 / w
+    Ks[:,1] *= 378 / h
+    intr = torch.from_numpy(Ks).unsqueeze(0).cuda()
     opts = dict(bbox_source='gt' if a.mask_source == 'sam3-tracking' else 'mask', mask_threshold=a.mask_threshold, capture_postprocess=not a.no_postprocess)
     if a.mask_source == 'sam3-tracking':
         opts.update(gt_hand_boxes=torch.from_numpy(boxes)[None].cuda(), gt_hand_valid=torch.from_numpy(valid)[None].cuda())
@@ -935,8 +969,8 @@ def main():
         raw = {k: v for k, v in arr.items() if k not in auxiliary}
         np.savez_compressed(a.output / 'camera_space_raw.npz', **raw, valid=valid)
         mano_path = (ROOT / json.loads(a.config.read_text())['mano_model_path']).resolve()
-        arr, post_report = refine_hands(dict(arr, valid=valid), np.broadcast_to(K, (n, 3, 3)), masks,
-                                        np.arange(n, dtype=np.float64) / fps, mano_path,
+        arr, post_report = refine_hands(dict(arr, valid=valid), Ks, masks,
+                                        timestamps, mano_path,
                                         lambda_fp=a.postprocess_lambda)
         post_report['mask_source'] = a.mask_source
         (a.output / 'POSTPROCESS.json').write_text(json.dumps(post_report, indent=2))
@@ -958,7 +992,7 @@ def main():
     rot = poses[:, :3, :3]
     trans = poses[:, :3, 3]
     np.savez_compressed(a.output / 'world_space.npz', camera_to_world=poses, world_joints=np.einsum('tij,thnj->thni', rot, arr['camera_joints']) + trans[:, None, None, :], world_vertices=np.einsum('tij,thnj->thni', rot, arr['camera_vertices']) + trans[:, None, None, :], world_global_orient=rot[:, None] @ arr['camera_global_orient'], world_translation=np.einsum('tij,thj->thi', rot, arr['camera_translation']) + trans[:, None, :], hand_pose=arr['hand_pose'], betas=arr['betas'], valid=valid)
-    receipt = dict(postprocess=post_report, cuda_graphs=a.cuda_graphs, cuda_graph_setup_seconds=graph_setup, feed_forward_fps=n/timing["camera_estimation_seconds"], ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else 'fixed', status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
+    receipt = dict(input_mode="dataset" if dataset_data is not None else "video", scene=a.scene, time_source=dataset_data["time_source"] if dataset_data is not None else "video FPS", postprocess=post_report, cuda_graphs=a.cuda_graphs, cuda_graph_setup_seconds=graph_setup, feed_forward_fps=n/timing["camera_estimation_seconds"], ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else 'fixed', status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
     (a.output / 'SUCCESS.json').write_text(json.dumps(receipt, indent=2))
     print(json.dumps(receipt, indent=2))
 if __name__ == '__main__':

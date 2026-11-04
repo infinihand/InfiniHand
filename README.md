@@ -59,10 +59,11 @@ Edit `configs/infinihand_v1.json`, including `mano_model_path`. The inference ch
 
 | Entry point | Image input | Intrinsics input | Processing |
 |---|---|---|---|
-| `python -m infinihand.infer` | Video file | Required `--intrinsics` JSON, one constant calibration for the video | Network + hand postprocessing + camera BA by default |
+| `infinihand.infer --video` | Video file | Required `--intrinsics` JSON, one constant calibration for the video | Network + hand postprocessing + camera BA by default |
+| `infinihand.infer --dataset-manifest` | One prepared dataset scene | Per-frame intrinsics from `UnifiedHandDataset` | Same pipeline; varying intrinsics require `--no-ba` |
 | `python -m infinihand.evaluation.camera_space` | Prepared dataset scenes | Per-frame intrinsics read by `UnifiedHandDataset` | Raw camera-space predictions and metrics; no hand postprocessing or BA |
 
-The video CLI does **not** currently accept a dataset manifest or dataloader directly. Its intrinsics JSON must describe the original video resolution:
+Choose one input mode: `--video` or `--dataset-manifest`. For video input, the intrinsics JSON must describe the original video resolution:
 
 ```json
 {"fx": 700.0, "fy": 700.0, "cx": 640.0, "cy": 360.0, "image_width": 1280, "image_height": 720}
@@ -70,7 +71,25 @@ The video CLI does **not** currently accept a dataset manifest or dataloader dir
 
 The CLI checks the decoded frame size, resizes RGB to 518×378, and scales `fx/cx` and `fy/cy` accordingly. Do not pre-scale the JSON to the network resolution. It reads frames in order without FPS resampling and processes at most `--max-frames` (default 8192); at least four frames are required. Use a fresh output directory for each run.
 
-For dataset integration in Python, `run_dual_stream` accepts image tensors `[1,T,3,H,W]` and matching per-frame intrinsics `[1,T,3,3]` directly; it does not read JSON. The caller must supply RGB in `[0,1]` and intrinsics adjusted to the same image geometry. This lower-level function runs the network only; the video CLI separately orchestrates hand refinement, BA and export.
+For dataset integration in Python, `run_dual_stream` accepts image tensors `[1,T,3,H,W]` and matching per-frame intrinsics `[1,T,3,3]` directly; it does not read JSON. The caller must supply RGB in `[0,1]` and intrinsics adjusted to the same image geometry. This lower-level function runs the network only; the CLI separately orchestrates hand refinement, BA and export for both input modes.
+
+### Run dataset inference
+
+Use a prepared dataset manifest (see [DATA.md](docs/DATA.md)) and an exact scene name. The loader reads ordered RGB frames and per-frame intrinsics; no separate intrinsics JSON is needed. Stored annotations may be read by the shared loader, but GT hand boxes, masks, joints and camera poses are not passed to the prediction or refinement stages.
+
+```bash
+python -m infinihand.infer \
+  --dataset-manifest /path/to/data/manifests/test/arctic.json \
+  --scene SCENE_NAME \
+  --config /path/to/InfiniHand/configs/infinihand_v1.json \
+  --checkpoint /path/to/weights/infinihand_v1.pt \
+  --mask-source base --mask-threshold 0.9 \
+  --postprocess-lambda 0.5 \
+  --droid-weights /path/to/weights/droid.pth \
+  --output /path/to/outputs/dataset_scene
+```
+
+This runs one scene per invocation and preserves frame IDs and timestamps in `input_metadata.npz`. If the scene has no valid increasing timestamps, explicitly add `--dataset-fps 10` **only if the stored frames are uniformly sampled at 10 FPS**. Valid source timestamps take precedence. Camera BA currently supports constant intrinsics; for varying intrinsics add `--no-ba`. Network inference and hand refinement still use every frame's own intrinsics. All mode switches below apply to both dataset and video inference.
 
 ### Run video inference
 
@@ -113,6 +132,7 @@ BA runs once after network inference, using every tenth **processed frame** plus
 
 | Option | Default | Meaning |
 |---|---|---|
+| `--ba-python` | Current Python | Python environment with the compiled DROID/LieTorch extensions |
 | `--ba-mode` | `fixed` | Fixed-stride keyframe selection |
 | `--ba-stride` | `10` | Keyframe spacing in processed frames |
 | `--ba-depth-init` | `none` | Initialize inverse depths to a constant, then optimize them |
@@ -139,37 +159,20 @@ Hand slots are ordered **right, left**. World coordinates use the predicted came
 | `world_space.npz` | The same final hand geometry transformed by camera poses | Always |
 | `POSTPROCESS.json` | Hand refinement settings, checks and timing | Hand postprocessing enabled |
 | `trajectory.npz`, `BA_REPORT.json` | Refined camera trajectory and BA diagnostics | BA enabled |
+| `input_metadata.npz` | Source frame IDs, timestamps and loader intrinsics | Dataset input |
 | `SUCCESS.json` | Completion receipt, settings and timing | Successful completion |
 
 The backbone overlaps with Camera/Mask/MANO heads on a second CUDA stream, preserving frame order and the 4-anchor + 16-recent-frame cache. Optional CUDA Graphs capture fixed-shape image encoders; they preserve precision and temporal computation but add startup cost and GPU memory use.
 
 `SUCCESS.json` reports `feed_forward_fps` and `cuda_graph_setup_seconds`. Feed-forward FPS includes auxiliary prediction capture but **excludes** video decoding, file I/O, model loading, offline hand postprocessing and BA. It is not end-to-end application throughput.
 
-## Hand postprocessing (enabled by default)
+### Hand postprocessing
 
-The inference CLI applies the following steps in order, using predictions only:
-
-1. **Fix shape separately for each hand.** Estimate one beta vector for the right hand and one for the left over the input clip. Reject coefficient outliers with a median/MAD score (threshold 3.5), then average the retained estimates. Fewer than five samples use a median fallback. Re-decode MANO while preserving wrist position. This assumes one person per hand slot; split clips at identity changes.
-2. **Refine depth with joint LSP.** Search camera-space wrist depth from 0.10 to 1.20 m in 5 mm steps. For every candidate, recompute both lateral translation components with LSP using the predicted 2D joints and the actual crop geometry. Score the projected MANO silhouette against the predicted hand mask with `I / (I + lambda * FP + FN)`, where `FP` is MANO outside the mask and `FN` is uncovered mask area. **The default lambda is 0.5.** A temporal dynamic program penalizes depth changes by `0.02 * (delta_z / 0.01 m)^2 * (0.1 s / delta_t)^2`. Empty masks or infeasible depth grids retain the fixed-shape original wrist before smoothing; counts and boundary selections are reported.
-3. **Apply SG5both.** Smooth wrist `tx/ty/tz` and the global plus 15 local MANO rotations separately with a five-frame quadratic fit. Rotation filtering uses local SO(3) tangents, not Euler-angle averaging. Beta remains fixed. Missing detections and gaps greater than 1.5 nominal frame intervals split the filter; missing hands are not filled in. Fewer than three consecutive valid frames remain unsmoothed. At regular 10 FPS this is the evaluated SG5 filter; actual timestamps are used for irregular spacing.
-
-The learned mask head supplies the refinement masks by default. With `--mask-source sam3-tracking`, refinement uses the resized binary SAM3 masks. No ground-truth masks, joints, depth or poses are used. The mask-guided search requires CUDA and Triton (included with the documented Linux CUDA PyTorch installation). Licensed MANO assets must match the model's geometry; reconstruction and LSP convention checks fail explicitly on mismatch.
-
-```bash
-# Append to the inference command to change the mask penalty:
---postprocess-lambda 0.5
-
-# Or disable all three hand refinement steps:
---no-postprocess
-```
-
-Postprocessing is **offline**, even though network inference is streaming: beta estimation and the depth path use the whole clip, and centered SG5 uses future frames (normally two, up to four at the boundaries). The five-frame window follows the input video FPS: at 10 FPS its normal lookahead is 0.2 s; this command does not resample videos to 10 FPS. The CLI derives frame times from the decoded video's declared constant FPS. For externally timestamped sequences, call `refine_hands` with the original timestamps. Fast motion and inaccurate masks can reduce alignment quality; the depth range may be unsuitable for distant hands.
-
-`camera_space_raw.npz` retains the network prediction. `camera_space.npz` contains the refined MANO parameters and matching joints/vertices; `world_space.npz` transforms that same refined geometry with the predicted/BA-refined camera poses. Camera pose estimation and BA settings are unchanged. `POSTPROCESS.json` records beta estimation, lambda, optimized/fallback/boundary hand counts, convention checks and postprocessing time. `SUCCESS.json` also contains that report. `feed_forward_fps` measures only the forward pipeline (including auxiliary capture), **not** offline refinement or BA; see the separate timing fields for total application cost. When disabled, no raw duplicate or postprocessing report is written and the existing camera-space output is preserved.
+Enabled by default for both input modes: **per-hand fixed beta → joint LSP depth (lambda 0.5) → SG5both**. Use `--no-postprocess` to disable it. See [POST_PROCESS.md](docs/POST_PROCESS.md) for the algorithm, parameters, fallback rules and offline/temporal behavior.
 
 ## Training
 
-Prepare unified scene manifests and set `dataset_jsons` and `sampling_weights` in `configs/training/`. All training manifests must declare `split: train`. See [the data format](data/README.md) for the manifest and geometry requirements. Place official LingBot-Map and WiLoR initialization weights at the configured paths.
+Prepare unified scene manifests and set `dataset_jsons` and `sampling_weights` in `configs/training/`. All training manifests must declare `split: train`. See [the data format](docs/DATA.md) for the manifest and geometry requirements. Place official LingBot-Map and WiLoR initialization weights at the configured paths.
 
 ### Training Stage I
 
