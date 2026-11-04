@@ -53,34 +53,97 @@ curl -L https://huggingface.co/cskrren/InfiniHand/resolve/main/inifinihand_v1.pt
   -o /path/to/weights/infinihand_v1.pt
 ```
 
-Edit `configs/infinihand_v1.json`, including `mano_model_path`. The checkpoint contains the learned backbone and Mask/MANO/Camera weights; licensed MANO assets are loaded separately. Prepare intrinsics for the original video resolution:
+### Inputs and intrinsics
+
+Edit `configs/infinihand_v1.json`, including `mano_model_path`. The inference checkpoint contains the learned backbone and Mask/MANO/Camera weights; licensed MANO assets are loaded separately.
+
+| Entry point | Image input | Intrinsics input | Processing |
+|---|---|---|---|
+| `python -m infinihand.infer` | Video file | Required `--intrinsics` JSON, one constant calibration for the video | Network + hand postprocessing + camera BA by default |
+| `python -m infinihand.evaluation.camera_space` | Prepared dataset scenes | Per-frame intrinsics read by `UnifiedHandDataset` | Raw camera-space predictions and metrics; no hand postprocessing or BA |
+
+The video CLI does **not** currently accept a dataset manifest or dataloader directly. Its intrinsics JSON must describe the original video resolution:
 
 ```json
 {"fx": 700.0, "fy": 700.0, "cx": 640.0, "cy": 360.0, "image_width": 1280, "image_height": 720}
 ```
 
-Run inference with the learned mask head and guarded BA:
+The CLI checks the decoded frame size, resizes RGB to 518×378, and scales `fx/cx` and `fy/cy` accordingly. Do not pre-scale the JSON to the network resolution. It reads frames in order without FPS resampling and processes at most `--max-frames` (default 8192); at least four frames are required. Use a fresh output directory for each run.
+
+For dataset integration in Python, `run_dual_stream` accepts image tensors `[1,T,3,H,W]` and matching per-frame intrinsics `[1,T,3,3]` directly; it does not read JSON. The caller must supply RGB in `[0,1]` and intrinsics adjusted to the same image geometry. This lower-level function runs the network only; the video CLI separately orchestrates hand refinement, BA and export.
+
+### Run video inference
+
+Run from the repository root after installing the dependencies and replacing the asset paths. The following command uses the learned mask head, **fixed-beta → joint LSP depth (lambda 0.5) → SG5both** hand refinement, and guarded camera BA:
 
 ```bash
 python -m infinihand.infer \
-  --video /path/to/video.mp4 --intrinsics /path/to/intrinsics.json \
+  --video /path/to/video.mp4 \
+  --intrinsics /path/to/intrinsics.json \
   --config /path/to/InfiniHand/configs/infinihand_v1.json \
   --checkpoint /path/to/weights/infinihand_v1.pt \
-  --mask-source base --droid-weights /path/to/weights/droid.pth \
+  --mask-source base --mask-threshold 0.9 \
+  --postprocess-lambda 0.5 \
+  --droid-weights /path/to/weights/droid.pth \
   --output /path/to/outputs/demo
 ```
 
-Backbone inference overlaps with Camera, Mask and MANO heads on a second CUDA stream, preserving frame order and the 4-anchor + 16-recent-frame cache. Add `--cuda-graphs` to capture the fixed-shape image encoders for repeated inference. This keeps the existing precision and temporal computation, but adds startup time and GPU memory usage; it is optional for short videos. `SUCCESS.json` reports `feed_forward_fps` and `cuda_graph_setup_seconds`. Feed-forward FPS excludes video decoding, file I/O, model loading and BA.
+| Desired mode | Change to the command above |
+|---|---|
+| Hand refinement without camera BA | Add `--no-ba`; DROID weights and extensions are not needed |
+| Network predictions only | Add both `--no-ba --no-postprocess` |
+| Camera BA without hand refinement | Add `--no-postprocess` |
+| Optional CUDA Graph acceleration | Add `--cuda-graphs` |
+| SAM3 tracking instead of the learned mask head | Replace `--mask-source base` with the arguments below |
 
-Use `--no-ba` to disable camera BA; add `--no-postprocess` for feed-forward-only inference. The BA defaults are `--ba-mode fixed --ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second. Keyframe count and full-sequence BA cost grow with video length; this implementation does not provide bounded-cost sliding-window optimization.
+For SAM3, first follow [the setup guide](third_party/sam3_tracking/README.md), then supply all four external assets/environment arguments:
 
-Use `--ba-depth-init sparse` to initialize inverse depth from RGB feature matches triangulated with Camera head poses and the supplied intrinsics. This uses no ground-truth poses or depth, inherits the predicted camera scale, and leaves depth free to change during BA. The default `none` uses constant inverse-depth initialization, also optimized by BA.
+```bash
+# Replace --mask-source base with these arguments:
+--mask-source sam3-tracking \
+--sam3-python /path/to/sam3-env/bin/python \
+--sam3-source /path/to/sam3 \
+--sam3-checkpoint /path/to/weights/sam3.pt \
+--detector /path/to/weights/detector.pt
+```
 
-Update rejection uses no ground truth. A keyframe falls back to its input camera pose if its translation correction exceeds `max(0.1 m, 5 × median correction)`, its rotation correction exceeds `max(10°, 5 × median correction)`, or its outgoing match weight is below 1% of the keyframe median in at least two of the first three BA iterations. The first pose anchors the world frame. Dense pose corrections are interpolated after rejected keyframes are restored. This guards against large failures but does not guarantee improved accuracy on every scene. `--ba-no-reject-outliers` disables it for ablations. `BA_REPORT.json` records rejected frames and thresholds.
+### Camera refinement (BA)
 
-Optional SAM3 tracking uses `--mask-source sam3-tracking` and the assets described in [the SAM3 setup guide](third_party/sam3_tracking/README.md).
+BA runs once after network inference, using every tenth **processed frame** plus the final frame. At 10 FPS the default spacing is one second. It does not optimize independently every ten frames, and its cost grows with the full sequence rather than a bounded sliding window.
 
-Outputs include `camera_space.npz`, `world_space.npz` and `SUCCESS.json`; BA also writes `trajectory.npz`. Hand slots are right, left. Use a fresh output directory. Each invocation accepts 4–8192 frames; BA runs after feed-forward prediction. World coordinates use the predicted camera scale.
+| Option | Default | Meaning |
+|---|---|---|
+| `--ba-mode` | `fixed` | Fixed-stride keyframe selection |
+| `--ba-stride` | `10` | Keyframe spacing in processed frames |
+| `--ba-depth-init` | `none` | Initialize inverse depths to a constant, then optimize them |
+| `--ba-depth-init sparse` | Optional | Initialize from RGB matches triangulated with predicted camera poses and supplied intrinsics |
+| `--ba-no-reject-outliers` | Off | Disable abnormal-update rejection for ablations |
+
+Both depth initialization modes use no ground truth and retain the predicted camera scale. The first pose anchors the world frame; corrections are interpolated to non-keyframes.
+
+<details>
+<summary>Abnormal-update rejection criteria</summary>
+
+A keyframe reverts to its input pose if its translation correction exceeds `max(0.1 m, 5 × median correction)`, its rotation correction exceeds `max(10°, 5 × median correction)`, or its outgoing match weight is below 1% of the keyframe median in at least two of the first three BA iterations. Rejected poses are restored before dense interpolation. `BA_REPORT.json` records rejected frames and thresholds. These checks guard against large failures but do not guarantee an accuracy improvement on every scene.
+
+</details>
+
+### Outputs and timing
+
+Hand slots are ordered **right, left**. World coordinates use the predicted camera scale.
+
+| File | Contents | When written |
+|---|---|---|
+| `camera_space_raw.npz` | Original network hand predictions | Hand postprocessing enabled |
+| `camera_space.npz` | Final camera-space MANO, joints and vertices | Always |
+| `world_space.npz` | The same final hand geometry transformed by camera poses | Always |
+| `POSTPROCESS.json` | Hand refinement settings, checks and timing | Hand postprocessing enabled |
+| `trajectory.npz`, `BA_REPORT.json` | Refined camera trajectory and BA diagnostics | BA enabled |
+| `SUCCESS.json` | Completion receipt, settings and timing | Successful completion |
+
+The backbone overlaps with Camera/Mask/MANO heads on a second CUDA stream, preserving frame order and the 4-anchor + 16-recent-frame cache. Optional CUDA Graphs capture fixed-shape image encoders; they preserve precision and temporal computation but add startup cost and GPU memory use.
+
+`SUCCESS.json` reports `feed_forward_fps` and `cuda_graph_setup_seconds`. Feed-forward FPS includes auxiliary prediction capture but **excludes** video decoding, file I/O, model loading, offline hand postprocessing and BA. It is not end-to-end application throughput.
 
 ## Hand postprocessing (enabled by default)
 
@@ -137,7 +200,7 @@ Batch size is per process; global batch size follows the number of processes. Fo
 
 ## Evaluation
 
-Edit `configs/evaluation/camera_space.yaml` to set the single inference checkpoint, model configuration, and test manifests for ARCTIC, HOT3D, EgoDex and HOI4D. Evaluation uses predicted mask boxes and reports camera-space joint errors and coverage for each scene.
+Edit `configs/evaluation/camera_space.yaml` to set the single inference checkpoint, model configuration, and test manifests for ARCTIC, HOT3D, EgoDex and HOI4D. Evaluation reads images and per-frame intrinsics through `UnifiedHandDataset`, uses predicted mask boxes, and reports raw camera-space joint errors and coverage for each scene. It does not require a separate intrinsics JSON and does not currently apply the video CLI's hand postprocessing or BA.
 
 ```bash
 python -m infinihand.evaluation.camera_space \
