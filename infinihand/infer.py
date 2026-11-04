@@ -485,6 +485,7 @@ def _run_all_head_stream(
     bbox_source: str = "mask",
     mask_threshold: float = 0.5,
     mask_blend_alpha: float = 0.0,
+    capture_postprocess: bool = False,
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any], dict[str, float]]:
     """Run 4+16 backbone memory with ordered heads on a separate CUDA stream."""
     if images.ndim != 5 or images.shape[0] != 1:
@@ -670,7 +671,12 @@ def _run_all_head_stream(
                     if backbone_packet.backbone_output.pose_enc is not None:
                         backbone_packet.backbone_output.pose_enc.record_stream(mano_stream)
                     del backbone_packet
-                    chunks.append(output_subset(output))
+                    subset = output_subset(output)
+                    if capture_postprocess:
+                        for key in ('pred_keypoints_2d', 'mano_crop_intrinsics', 'mano_virtual_rotations', 'lsp_valid_mask'):
+                            subset[key] = output[key][0].detach().cpu()
+                        subset['postprocess_masks'] = (output['pred_bbox_mask_probability'][0] > mask_threshold).detach().cpu()
+                    chunks.append(subset)
                     end.record(mano_stream)
                     mano_events.append((start, end))
                     record_stream_tree(packet.output, mano_stream)
@@ -814,6 +820,8 @@ def parser():
     p.add_argument('--ba-python', default=sys.executable)
     p.add_argument('--droid-weights', type=Path, default=Path('/path/to/weights/droid.pth'))
     p.add_argument('--no-ba', action='store_true')
+    p.add_argument('--no-postprocess', action='store_true', help='Disable offline fixed-beta, joint LSP depth and SG5 refinement')
+    p.add_argument('--postprocess-lambda', type=float, default=0.5, help='FP weight in mask-guided depth score (default: 0.5)')
     p.add_argument('--ba-mode', choices=['fixed'], default='fixed', help='Fixed-stride keyframe BA')
     p.add_argument('--ba-stride', type=int, default=10)
     p.add_argument('--ba-depth-init', choices=['none', 'sparse'], default='none')
@@ -823,6 +831,8 @@ def parser():
 
 def main():
     a = parser().parse_args()
+    if not np.isfinite(a.postprocess_lambda) or a.postprocess_lambda <= 0:
+        raise ValueError('postprocess-lambda must be positive and finite')
     if not 0 < a.mask_threshold < 1:
         raise ValueError('mask threshold must be in (0,1)')
     if not 4 <= a.max_frames <= 8192:
@@ -892,14 +902,14 @@ def main():
     K[0] *= 518 / w
     K[1] *= 378 / h
     intr = torch.from_numpy(K).view(1, 1, 3, 3).expand(1, n, 3, 3).cuda()
-    opts = dict(bbox_source='gt' if a.mask_source == 'sam3-tracking' else 'mask', mask_threshold=a.mask_threshold)
+    opts = dict(bbox_source='gt' if a.mask_source == 'sam3-tracking' else 'mask', mask_threshold=a.mask_threshold, capture_postprocess=not a.no_postprocess)
     if a.mask_source == 'sam3-tracking':
         opts.update(gt_hand_boxes=torch.from_numpy(boxes)[None].cuda(), gt_hand_valid=torch.from_numpy(valid)[None].cuda())
     with torch.inference_mode():
         (out, stats, timing) = run_dual_stream(model, images, intr, **opts)
         (world, _) = camera_to_predicted_global(out)
     validate_contract(stats, n)
-    arr = {k: v.float().cpu().numpy() for (k, v) in out.items()}
+    arr = {k: v.cpu().numpy() if v.dtype == torch.bool else v.float().cpu().numpy() for (k, v) in out.items()}
     poses = world['pred_camera_to_anchor'].float().cpu().numpy()
     if a.mask_source == 'base':
         boxes = arr['mask_tight_boxes']
@@ -907,6 +917,35 @@ def main():
     for (key, value) in arr.items():
         if not np.isfinite(value).all():
             raise ValueError('Non-finite model output: ' + key)
+    auxiliary = {'pred_keypoints_2d', 'mano_crop_intrinsics', 'mano_virtual_rotations', 'lsp_valid_mask', 'postprocess_masks'}
+    post_report = dict(enabled=False)
+    if not a.no_postprocess:
+        from .postprocess import refine_hands
+        masks = arr.pop('postprocess_masks')
+        if a.mask_source == 'sam3-tracking':
+            masks = np.zeros((n, 2, 378, 518), dtype=bool)
+            for row in records:
+                i = int(row['frame_idx'])
+                side = {'right': 0, 'left': 1}[row['side_name']]
+                mask_path = a.output / 'sam3' / row['mask_relpath']
+                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    raise FileNotFoundError(mask_path)
+                masks[i, side] = cv2.resize(mask, (518, 378), interpolation=cv2.INTER_NEAREST) > 0
+        raw = {k: v for k, v in arr.items() if k not in auxiliary}
+        np.savez_compressed(a.output / 'camera_space_raw.npz', **raw, valid=valid)
+        mano_path = (ROOT / json.loads(a.config.read_text())['mano_model_path']).resolve()
+        arr, post_report = refine_hands(dict(arr, valid=valid), np.broadcast_to(K, (n, 3, 3)), masks,
+                                        np.arange(n, dtype=np.float64) / fps, mano_path,
+                                        lambda_fp=a.postprocess_lambda)
+        post_report['mask_source'] = a.mask_source
+        (a.output / 'POSTPROCESS.json').write_text(json.dumps(post_report, indent=2))
+        arr.pop('valid')
+        arr = {k: v for k, v in arr.items() if k not in auxiliary}
+        del masks
+        for key, value in arr.items():
+            if not np.isfinite(value).all():
+                raise ValueError('Non-finite postprocessed output: ' + key)
     np.savez_compressed(a.output / 'camera_space.npz', **arr, valid=valid)
     np.savez_compressed(a.output / 'ba_inputs.npz', poses=poses, boxes=boxes)
     del out, world, model, images, intr
@@ -919,7 +958,7 @@ def main():
     rot = poses[:, :3, :3]
     trans = poses[:, :3, 3]
     np.savez_compressed(a.output / 'world_space.npz', camera_to_world=poses, world_joints=np.einsum('tij,thnj->thni', rot, arr['camera_joints']) + trans[:, None, None, :], world_vertices=np.einsum('tij,thnj->thni', rot, arr['camera_vertices']) + trans[:, None, None, :], world_global_orient=rot[:, None] @ arr['camera_global_orient'], world_translation=np.einsum('tij,thj->thi', rot, arr['camera_translation']) + trans[:, None, :], hand_pose=arr['hand_pose'], betas=arr['betas'], valid=valid)
-    receipt = dict(cuda_graphs=a.cuda_graphs, cuda_graph_setup_seconds=graph_setup, feed_forward_fps=n/timing["camera_estimation_seconds"], ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else 'fixed', status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
+    receipt = dict(postprocess=post_report, cuda_graphs=a.cuda_graphs, cuda_graph_setup_seconds=graph_setup, feed_forward_fps=n/timing["camera_estimation_seconds"], ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else 'fixed', status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
     (a.output / 'SUCCESS.json').write_text(json.dumps(receipt, indent=2))
     print(json.dumps(receipt, indent=2))
 if __name__ == '__main__':

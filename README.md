@@ -15,7 +15,7 @@ InfiniHand estimates hand masks, camera-space MANO parameters and camera motion 
 
 - **Stage I:** train mask and MANO reconstruction branches on short clips.
 - **Stage II:** continue training the MANO and mask branches on longer clips and train the camera head. The camera head is trained only in Stage II.
-- **Inference:** predict masks, hands and cameras, optionally refine cameras with sparse BA, and export camera-space and world-space geometry.
+- **Inference:** predict masks, hands and cameras, refine hands with default offline postprocessing, optionally refine cameras with sparse BA, and export camera-space and world-space geometry.
 
 Training (`infinihand.train`) and inference (`infinihand.infer`) have separate entry points and share the model definitions.
 
@@ -72,7 +72,7 @@ python -m infinihand.infer \
 
 Backbone inference overlaps with Camera, Mask and MANO heads on a second CUDA stream, preserving frame order and the 4-anchor + 16-recent-frame cache. Add `--cuda-graphs` to capture the fixed-shape image encoders for repeated inference. This keeps the existing precision and temporal computation, but adds startup time and GPU memory usage; it is optional for short videos. `SUCCESS.json` reports `feed_forward_fps` and `cuda_graph_setup_seconds`. Feed-forward FPS excludes video decoding, file I/O, model loading and BA.
 
-Use `--no-ba` for feed-forward-only inference. The BA defaults are `--ba-mode fixed --ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second. Keyframe count and full-sequence BA cost grow with video length; this implementation does not provide bounded-cost sliding-window optimization.
+Use `--no-ba` to disable camera BA; add `--no-postprocess` for feed-forward-only inference. The BA defaults are `--ba-mode fixed --ba-stride 10 --ba-depth-init none`, with abnormal-update rejection enabled. BA selects every tenth **processed frame**, includes the last frame, and runs once over these keyframes after feed-forward inference; it does not run a separate optimization every ten frames. At 10 FPS, the keyframe spacing is one second. Keyframe count and full-sequence BA cost grow with video length; this implementation does not provide bounded-cost sliding-window optimization.
 
 Use `--ba-depth-init sparse` to initialize inverse depth from RGB feature matches triangulated with Camera head poses and the supplied intrinsics. This uses no ground-truth poses or depth, inherits the predicted camera scale, and leaves depth free to change during BA. The default `none` uses constant inverse-depth initialization, also optimized by BA.
 
@@ -81,6 +81,28 @@ Update rejection uses no ground truth. A keyframe falls back to its input camera
 Optional SAM3 tracking uses `--mask-source sam3-tracking` and the assets described in [the SAM3 setup guide](third_party/sam3_tracking/README.md).
 
 Outputs include `camera_space.npz`, `world_space.npz` and `SUCCESS.json`; BA also writes `trajectory.npz`. Hand slots are right, left. Use a fresh output directory. Each invocation accepts 4–8192 frames; BA runs after feed-forward prediction. World coordinates use the predicted camera scale.
+
+## Hand postprocessing (enabled by default)
+
+The inference CLI applies the following steps in order, using predictions only:
+
+1. **Fix shape separately for each hand.** Estimate one beta vector for the right hand and one for the left over the input clip. Reject coefficient outliers with a median/MAD score (threshold 3.5), then average the retained estimates. Fewer than five samples use a median fallback. Re-decode MANO while preserving wrist position. This assumes one person per hand slot; split clips at identity changes.
+2. **Refine depth with joint LSP.** Search camera-space wrist depth from 0.10 to 1.20 m in 5 mm steps. For every candidate, recompute both lateral translation components with LSP using the predicted 2D joints and the actual crop geometry. Score the projected MANO silhouette against the predicted hand mask with `I / (I + lambda * FP + FN)`, where `FP` is MANO outside the mask and `FN` is uncovered mask area. **The default lambda is 0.5.** A temporal dynamic program penalizes depth changes by `0.02 * (delta_z / 0.01 m)^2 * (0.1 s / delta_t)^2`. Empty masks or infeasible depth grids retain the fixed-shape original wrist before smoothing; counts and boundary selections are reported.
+3. **Apply SG5both.** Smooth wrist `tx/ty/tz` and the global plus 15 local MANO rotations separately with a five-frame quadratic fit. Rotation filtering uses local SO(3) tangents, not Euler-angle averaging. Beta remains fixed. Missing detections and gaps greater than 1.5 nominal frame intervals split the filter; missing hands are not filled in. Fewer than three consecutive valid frames remain unsmoothed. At regular 10 FPS this is the evaluated SG5 filter; actual timestamps are used for irregular spacing.
+
+The learned mask head supplies the refinement masks by default. With `--mask-source sam3-tracking`, refinement uses the resized binary SAM3 masks. No ground-truth masks, joints, depth or poses are used. The mask-guided search requires CUDA and Triton (included with the documented Linux CUDA PyTorch installation). Licensed MANO assets must match the model's geometry; reconstruction and LSP convention checks fail explicitly on mismatch.
+
+```bash
+# Append to the inference command to change the mask penalty:
+--postprocess-lambda 0.5
+
+# Or disable all three hand refinement steps:
+--no-postprocess
+```
+
+Postprocessing is **offline**, even though network inference is streaming: beta estimation and the depth path use the whole clip, and centered SG5 uses future frames (normally two, up to four at the boundaries). The five-frame window follows the input video FPS: at 10 FPS its normal lookahead is 0.2 s; this command does not resample videos to 10 FPS. The CLI derives frame times from the decoded video's declared constant FPS. For externally timestamped sequences, call `refine_hands` with the original timestamps. Fast motion and inaccurate masks can reduce alignment quality; the depth range may be unsuitable for distant hands.
+
+`camera_space_raw.npz` retains the network prediction. `camera_space.npz` contains the refined MANO parameters and matching joints/vertices; `world_space.npz` transforms that same refined geometry with the predicted/BA-refined camera poses. Camera pose estimation and BA settings are unchanged. `POSTPROCESS.json` records beta estimation, lambda, optimized/fallback/boundary hand counts, convention checks and postprocessing time. `SUCCESS.json` also contains that report. `feed_forward_fps` measures only the forward pipeline (including auxiliary capture), **not** offline refinement or BA; see the separate timing fields for total application cost. When disabled, no raw duplicate or postprocessing report is written and the existing camera-space output is preserved.
 
 ## Training
 
