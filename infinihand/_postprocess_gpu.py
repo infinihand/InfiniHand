@@ -1,6 +1,12 @@
-"""Isolated GPU postprocessing candidate. Same grid and objective as reference.
-CPU handles segment/window indices and input validation only. All geometry,
-scoring, DP and smoothing arithmetic stays on CUDA; outputs copied once.
+"""Batched CUDA implementation of offline hand refinement.
+
+Public entry point: :func:`infinihand.postprocess.refine_hands`. The numerical
+objective matches ``refine_hands_reference``. CUDA handles geometry, packed
+silhouette scores, temporal depth selection and SO(3) smoothing. CPU handles
+validation and scheduling; a small availability readback defines segments,
+and final geometry/audit values are transferred at the return boundary.
+
+See ``docs/GPU_POSTPROCESS.md`` for tensor conventions and timing boundaries.
 """
 
 import time
@@ -9,7 +15,8 @@ import torch
 from .postprocess import segments
 
 
-def rotvec(R):
+def rotvec(R: torch.Tensor) -> torch.Tensor:
+    """Convert [..., 3, 3] rotation matrices to principal SO(3) log vectors."""
     # Markley matrix-to-quaternion conversion (SciPy convention, scalar last).
     d = R.diagonal(dim1=-2, dim2=-1)
     tr = d.sum(-1)
@@ -52,7 +59,8 @@ def rotvec(R):
     return q[..., :3] * scale[..., None]
 
 
-def expmap(v):
+def expmap(v: torch.Tensor) -> torch.Tensor:
+    """Convert [..., 3] SO(3) log vectors to rotation matrices stably near zero."""
     theta = torch.linalg.vector_norm(v, dim=-1)
     a = torch.sinc(theta / torch.pi)
     b = 0.5 * torch.sinc(theta / (2 * torch.pi)) ** 2
@@ -82,6 +90,12 @@ def refine_hands_gpu(
     frame_batch=1024,
     raster_batch=4096,
 ):
+    """Refine one clip; called after public API validation.
+
+    The two batch limits govern temporary work, not the full clip residency.
+    Returns NumPy predictions and a JSON-serializable audit. Geometry precision
+    intentionally matches the reference: FP64 MANO/SG5, FP32 LSP/projection.
+    """
     from .models.mutual_hand_joint_fusion import decode_camera_translation_lsp as lsp
     from .wilor.models.mano_wrapper import MANO
     from ._postprocess_packed import pack_masks, gpu_score
@@ -95,6 +109,7 @@ def refine_hands_gpu(
         e.record()
         events.append((name, e))
 
+    # 1. Upload the clip once and initialize the matching MANO assets.
     mark("begin")
     valid = np.asarray(prediction["valid"], bool)
     ts = np.asarray(timestamps, np.float64)
@@ -126,6 +141,7 @@ def refine_hands_gpu(
         for h in range(2)
     ]
     mark("model_setup")
+    # 2. Fix per-hand beta with MAD filtering; verify the original MANO decode.
     errors = []
     shape_reports = []
     for h, model in enumerate(models):
@@ -192,6 +208,7 @@ def refine_hands_gpu(
                     q["camera_joints"][ii, h] = j.to(q["camera_joints"].dtype)
                     q["camera_vertices"][ii, h] = v.to(q["camera_vertices"].dtype)
     mark("fixed_beta_decode")
+    # 3. Search the unchanged camera-depth grid in batches of valid frames.
     zg = np.arange(0.10, 1.20001, 0.005, dtype=np.float32)
     z = tensor(zg)
     G = len(zg)
@@ -266,6 +283,7 @@ def refine_hands_gpu(
             translations[ii, h] = trs
             ev1 = torch.cuda.Event(enable_timing=True)
             ev1.record()
+            # Flatten (frame, depth) candidates; each target is packed only once.
             target = torch.zeros((B, res, res), device=device, dtype=torch.bool)
             target[:, :H, :W] = mask[ii, h]
             target_sum = target.sum((-1, -2))
@@ -296,6 +314,7 @@ def refine_hands_gpu(
             ev2.record()
             kernel_sections.append((ev0, ev1, ev2))
     mark("lsp_raster_score")
+    # 4. Select depth paths without copying per-candidate scores to the host.
     # One tiny availability transfer for segment topology; no per-frame .item().
     available = (p["valid"].bool() & feasible.any(-1)).cpu().numpy()
     selected = torch.full((n, 2), -1, device=device, dtype=torch.long)
@@ -322,6 +341,7 @@ def refine_hands_gpu(
     ).squeeze(2)
     xyz = torch.where((selected >= 0)[:, :, None], gather, xyz)
     mark("depth_dp")
+    # 5. Apply segment-local SG5 to wrist positions and SO(3) pose tangents.
     rotations = torch.cat(
         (q["camera_global_orient"][:, :, None], q["hand_pose"]), 2
     ).double()
@@ -355,6 +375,7 @@ def refine_hands_gpu(
             rv = rotvec(rel)
             smoothr[ii, h] = anchor @ expmap((weights[:, :, None, None] * rv).sum(1))
     mark("sg5")
+    # 6. Decode the final consistent joints/mesh and package the audit.
     for h, model in enumerate(models):
         ix = tensor(np.flatnonzero(valid[:, h]), torch.long)
         for st in range(0, len(ix), 128):

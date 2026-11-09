@@ -1,6 +1,8 @@
 """Lossless packed triangle silhouettes and exact popcount mask scores."""
 
-import numpy as np, torch, triton, triton.language as tl
+import torch
+import triton
+import triton.language as tl
 
 
 @triton.jit
@@ -16,6 +18,8 @@ def raster_packed(
     W: tl.constexpr,
     B: tl.constexpr,
 ):
+    # Pixel p=y*RES+x occupies word p//32, bit p%32. Atomic OR gives
+    # silhouette union coverage even when triangles overlap.
     face = tl.program_id(0)
     batch = tl.program_id(1)
     a = tl.load(F + face * 3)
@@ -70,6 +74,7 @@ def pack_target(T, P, PIX: tl.constexpr, WORDS: tl.constexpr, B: tl.constexpr):
 
 @triton.jit
 def popcount(v):
+    # SWAR population count; interpret signed int32 storage as unsigned bits.
     v = v.to(tl.uint32)
     v = v - ((v >> 1) & 0x55555555)
     v = (v & 0x33333333) + ((v >> 2) & 0x33333333)
@@ -97,7 +102,12 @@ def score_packed(
     tl.store(S + c, inter.to(tl.float64) / tl.maximum(denom, 1.0))
 
 
-def pack_masks(target):
+def pack_masks(target: torch.Tensor) -> torch.Tensor:
+    """Pack CUDA bool masks [F, R, R] into int32 [F, ceil(R*R/32)].
+
+    Padding bits in the last word are zero. Signed storage does not change the
+    bit pattern; kernels reinterpret words as uint32 before bit operations.
+    """
     pix = target.shape[-2] * target.shape[-1]
     words = triton.cdiv(pix, 32)
     out = torch.empty((target.shape[0], words), device=target.device, dtype=torch.int32)
@@ -110,6 +120,14 @@ def pack_masks(target):
 def gpu_score(
     uv, faces, res, height, width, packed_target, frame_ids, target_sum, lambda_fp
 ):
+    """Rasterize candidate silhouettes and return float64 overlap scores.
+
+    ``uv`` is [C, V, 2] in original pixel coordinates; ``faces`` is int32
+    [F, 3]. ``frame_ids[C]`` maps candidates to ``packed_target`` rows.
+    ``res`` is the square padded stride; only [0:height, 0:width] is valid.
+    ``target_sum`` contains uncompressed target pixel counts. Full candidate
+    masks are never materialized: the packed buffer is consumed directly.
+    """
     words = triton.cdiv(res * res, 32)
     buf = torch.zeros((uv.shape[0], words), device=uv.device, dtype=torch.int32)
     raster_packed[(faces.shape[0], uv.shape[0])](

@@ -25,44 +25,10 @@ Postprocessing is **offline**, even though network inference is streaming: beta 
 
 ## GPU batching and packed masks
 
-The default backend keeps MANO decoding, LSP search, scoring, temporal depth
-selection and SG5 arithmetic on CUDA. Raster masks store 32 binary pixels per
-32-bit word; intersection and area are computed by exact integer popcounts.
-This does not reduce image resolution, the 221 depth candidates, the 25
-bisection iterations, or the temporal objective. CPU work is limited to asset
-loading, input checks, segment/window scheduling and output packaging. One
-small availability readback determines depth-path segments.
+The default backend uses lossless packed masks and batched CUDA geometry. Use
+`--postprocess-frame-batch` (default 1024) and `--postprocess-raster-batch`
+(default 4096) to tune temporary memory. The numerical objective above is unchanged.
 
-```bash
---postprocess-frame-batch 1024 --postprocess-raster-batch 4096
-# For less temporary GPU memory:
---postprocess-frame-batch 128 --postprocess-raster-batch 1024
-```
-
-The first option bounds frames per LSP batch; the second bounds concurrent
-raster candidates. Lower values trade throughput for memory. This remains an
-offline algorithm: these options do not bound total clip storage or enable
-causal inference. The default uses one frame batch for the measured 675-frame
-clip. MANO decoding retains the reference's FP64 arithmetic; LSP/projection
-uses FP32 and scores use FP64, with autocast disabled inside refinement.
-
-An A800-SXM4-80GB single-scene check on ARCTIC `s05_box_grab_01_0` (675 frames,
-1,163 valid hand observations, new EgoBench checkpoint SHA-256
-`acc2ec7cc9136b2ff5e7ab260c4708585e92e87ec34881f38c38074ab3ca7859`)
-measured 31.42 seconds for the reference and 0.830–0.833 seconds for repeated
-packed-batch refinement, with approximately 1.69 GiB peak allocated GPU memory
-for standalone postprocessing. The first invocation in that final process took
-1.55 seconds; first-ever Triton compilation can add more overhead. These times
-include input/output transfers and checks, but exclude network inference,
-dataset I/O and visualization. They are **not** end-to-end FPS or a multi-dataset
-speed guarantee. GPU-memory figures exclude the neural network.
-
-All selected depth paths matched the reference. Maximum valid joint/vertex
-coordinate difference was `5.96e-8` metres. Raster and target-packing checks on
-16 hand observations found zero pixel differences and identical scores.
-`refine_hands_reference` is retained for regression comparisons; production
-`refine_hands` uses packed masks. Reports include backend, batch sizes, total
-wall time and CUDA-event stage intervals. Stage intervals can include CPU
-launch gaps; they are not kernel-only profiler measurements. Peak allocated
-memory reflects the process CUDA allocator high-water mark, including any
-resident model when called from the full inference CLI.
+See [GPU implementation and API guide](GPU_POSTPROCESS.md) for the code map,
+input shapes and coordinate conventions, packing layout, precision, batch tuning,
+report fields, measured performance and reproducible test commands.
