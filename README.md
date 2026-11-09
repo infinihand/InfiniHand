@@ -175,7 +175,7 @@ The backbone overlaps with Camera/Mask/MANO heads on a second CUDA stream, prese
 
 ### Hand postprocessing
 
-Enabled by default for both input modes: **per-hand fixed beta → joint LSP depth (lambda 0.5) → SG5both**. Use `--no-postprocess` to disable it. See [POST_PROCESS.md](docs/POST_PROCESS.md) for the algorithm, parameters, fallback rules and offline/temporal behavior.
+The GPU packed-mask backend is enabled by default for both input modes: **per-hand fixed beta → joint LSP depth (lambda 0.5) → SG5both**. Use `--no-postprocess` to disable it. See [POST_PROCESS.md](docs/POST_PROCESS.md) for the algorithm, parameters, fallback rules and offline/temporal behavior.
 
 ## Training
 

@@ -72,7 +72,7 @@ def stabilize_prediction(prediction, mano_model_path, threshold=3.5, scale_floor
     against wrong MANO assets, hand ordering or decoder conventions.
     """
     import torch
-    from infinihand.wilor.models.mano_wrapper import MANO
+    from .wilor.models.mano_wrapper import MANO
 
     if batch_size < 1:
         raise ValueError('batch_size must be positive')

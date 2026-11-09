@@ -826,6 +826,8 @@ def parser():
     p.add_argument('--no-ba', action='store_true')
     p.add_argument('--no-postprocess', action='store_true', help='Disable offline fixed-beta, joint LSP depth and SG5 refinement')
     p.add_argument('--postprocess-lambda', type=float, default=0.5, help='FP weight in mask-guided depth score (default: 0.5)')
+    p.add_argument('--postprocess-frame-batch', type=int, default=1024, help='Maximum frames per GPU LSP batch')
+    p.add_argument('--postprocess-raster-batch', type=int, default=4096, help='Maximum packed-mask candidates rendered together; reduce for lower VRAM')
     p.add_argument('--ba-mode', choices=['fixed'], default='fixed', help='Fixed-stride keyframe BA')
     p.add_argument('--ba-stride', type=int, default=10)
     p.add_argument('--ba-depth-init', choices=['none', 'sparse'], default='none')
@@ -835,6 +837,8 @@ def parser():
 
 def main():
     a = parser().parse_args()
+    if a.postprocess_frame_batch < 1 or a.postprocess_raster_batch < 1:
+        raise ValueError('Postprocessing batch sizes must be positive')
     if not np.isfinite(a.postprocess_lambda) or a.postprocess_lambda <= 0:
         raise ValueError('postprocess-lambda must be positive and finite')
     if not 0 < a.mask_threshold < 1:
@@ -971,7 +975,9 @@ def main():
         mano_path = (ROOT / json.loads(a.config.read_text())['mano_model_path']).resolve()
         arr, post_report = refine_hands(dict(arr, valid=valid), Ks, masks,
                                         timestamps, mano_path,
-                                        lambda_fp=a.postprocess_lambda)
+                                        lambda_fp=a.postprocess_lambda,
+                                        frame_batch=a.postprocess_frame_batch,
+                                        raster_batch=a.postprocess_raster_batch)
         post_report['mask_source'] = a.mask_source
         (a.output / 'POSTPROCESS.json').write_text(json.dumps(post_report, indent=2))
         arr.pop('valid')

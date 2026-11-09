@@ -68,7 +68,7 @@ def select_depth_path(scores, feasible, valid, timestamps, z_grid):
     return selected
 
 
-def refine_hands(prediction, intrinsics, masks, timestamps, mano_model_path, *, lambda_fp=.5, device='cuda'):
+def refine_hands_reference(prediction, intrinsics, masks, timestamps, mano_model_path, *, lambda_fp=.5, device='cuda'):
     """Return refined camera prediction and a JSON-serializable audit report.
 
     The four LSP auxiliary fields must come from the same forward pass. Masks
@@ -183,3 +183,41 @@ def refine_hands(prediction, intrinsics, masks, timestamps, mano_model_path, *, 
         q['hand_pose'][ids,hand] = rotations[ids,hand,1:]
     report = dict(enabled=True, lambda_fp=float(lambda_fp), formula='I/(I+lambda*FP+FN)', order=['per-hand fixed beta','joint LSP depth','SG5 wrist and SO3 pose'], shape=shape_report, z_grid_m=[.1,1.2,.005], temporal_depth_penalty='0.02*(delta_z/0.01m)^2*(0.1s/dt)^2', smoothing_window_frames=5, polynomial_order=2, gap_policy='missing detections or >1.5 median frame intervals', input_valid_hands=int(valid.sum()), optimized_hands=int((selected>=0).sum()), fallback_hands=int((valid & (selected<0)).sum()), boundary_hands=int(((selected==0)|(selected==G-1)).sum()), max_lsp_reproduction_error_m=max_reproduction, seconds=time.perf_counter()-started, causal=False, gt_used=False)
     return q, report
+
+
+def refine_hands(prediction, intrinsics, masks, timestamps, mano_model_path,
+                 *, lambda_fp=.5, device='cuda', frame_batch=1024, raster_batch=4096):
+    """GPU packed-mask implementation; same objective as the reference.
+
+    Batch sizes bound concurrent frame geometry and raster candidates. Segment
+    scheduling stays on CPU; geometry, scoring, DP and SG5 arithmetic use CUDA.
+    The algorithm remains offline and does not fill missing detections.
+    """
+    if frame_batch < 1 or raster_batch < 1:
+        raise ValueError('Postprocessing batch sizes must be positive')
+    if not np.isfinite(lambda_fp) or lambda_fp <= 0:
+        raise ValueError('lambda_fp must be positive and finite')
+    if torch.device(device).type != 'cuda':
+        raise ValueError('Mask-guided depth search requires CUDA and Triton')
+    required = {'betas','valid','hand_pose','camera_global_orient','camera_joints',
+                'camera_vertices','camera_translation','pred_keypoints_2d',
+                'mano_virtual_rotations','mano_crop_intrinsics','lsp_valid_mask'}
+    if not required.issubset(prediction):
+        raise ValueError(f'Missing prediction fields: {sorted(required-set(prediction))}')
+    if any(k.startswith('world_') for k in prediction):
+        raise ValueError('Pass camera-space predictions, not world-space geometry')
+    valid = np.asarray(prediction['valid'], dtype=bool)
+    if valid.ndim != 2 or valid.shape[1] != 2 or len(valid) == 0:
+        raise ValueError('Require nonempty validity [T,2] in right/left order')
+    n = len(valid)
+    ts = np.asarray(timestamps, dtype=np.float64)
+    K = np.asarray(intrinsics, dtype=np.float32)
+    masks = np.asarray(masks, dtype=bool)
+    if ts.shape != (n,) or not np.isfinite(ts).all() or np.any(np.diff(ts)<=0):
+        raise ValueError('Require finite, strictly increasing timestamps [T]')
+    if K.shape != (n,3,3) or not np.isfinite(K).all() or masks.ndim != 4 or masks.shape[:2] != (n,2):
+        raise ValueError('Require intrinsics [T,3,3] and masks [T,2,H,W]')
+    from ._postprocess_gpu import refine_hands_gpu
+    return refine_hands_gpu(prediction, K, masks, ts, mano_model_path,
+                            lambda_fp=lambda_fp, device=device,
+                            frame_batch=frame_batch, raster_batch=raster_batch)
