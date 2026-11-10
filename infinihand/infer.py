@@ -19,10 +19,8 @@ training entrypoint.
 
 from __future__ import annotations
 
-import argparse
-import os
-import subprocess
-import cv2
+BENCH_BRANCH_BF16 = False
+
 import json
 import queue
 import sys
@@ -32,7 +30,6 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 
 
@@ -69,64 +66,10 @@ def build_model(checkpoint, device, config_path):
 
 
 def prepare_cuda_graphs(model: LingBotMapHand) -> float:
-    """Capture stateless image encoders for B=1 streaming and four anchor frames.
-
-    Call once on an eval model before starting inference threads. Precision and
-    temporal-cache behavior are unchanged; graph outputs are cloned before reuse.
-    """
-    if model.training or not torch.cuda.is_available():
-        raise ValueError('CUDA graph preparation requires an eval model on CUDA')
-    started = time.perf_counter()
-    def clone_tree(value):
-        if torch.is_tensor(value):
-            return value.clone()
-        if isinstance(value, dict):
-            return {key: clone_tree(item) for key, item in value.items()}
-        if isinstance(value, tuple):
-            return tuple(clone_tree(item) for item in value)
-        if isinstance(value, list):
-            return [clone_tree(item) for item in value]
-        return value
-
-    def capture(module, shapes, autocast, spatial_only=False):
-        if getattr(module, '_inference_graphs_prepared', False):
-            return
-        original = module.forward
-        operation = (lambda x: module.forward_features(x, spatial_only=True)) if spatial_only else original
-        cache = {}
-        device = next(module.parameters()).device
-        stream = torch.cuda.Stream(device=device)
-        with torch.cuda.device(device), torch.inference_mode():
-            for shape in shapes:
-                static = torch.zeros(shape, device=device, dtype=torch.float32)
-                stream.wait_stream(torch.cuda.current_stream(device))
-                with torch.cuda.stream(stream), torch.autocast('cuda', dtype=torch.bfloat16, enabled=autocast, cache_enabled=False):
-                    for _ in range(3):
-                        operation(static)
-                torch.cuda.current_stream(device).wait_stream(stream)
-                torch.cuda.synchronize(device)
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph), torch.autocast('cuda', dtype=torch.bfloat16, enabled=autocast, cache_enabled=False):
-                    output = operation(static)
-                cache[shape] = (graph, static, output)
-        def replay(x):
-            if module.training or not torch.is_inference_mode_enabled() or tuple(x.shape) not in cache:
-                return original(x)
-            graph, static, output = cache[tuple(x.shape)]
-            static.copy_(x)
-            graph.replay()
-            return clone_tree(output)
-        module.forward = replay
-        module._inference_graphs_prepared = True
-
-    h, w = model.cfg.image_height, model.cfg.image_width
-    capture(model.backbone.model.aggregator.patch_embed, [(1, 3, h, w), (ANCHOR_FRAMES, 3, h, w)], True)
-    provider = model.hand_encoder
-    batches = sorted({min(provider.chunk_size, total-i) for total in (2, 2*ANCHOR_FRAMES)
-                      for i in range(0, total, provider.chunk_size)})
-    capture(provider.backbone, [(batch, 3, provider.crop_size, provider.crop_size-64) for batch in batches], False, spatial_only=True)
-    torch.cuda.synchronize(next(model.parameters()).device)
-    return time.perf_counter() - started
+    """Compatibility entry point; capture at the active inference precision."""
+    from .runtime.graphs import prepare_image_encoder_graphs
+    return prepare_image_encoder_graphs(model, branch_bf16=BENCH_BRANCH_BF16,
+                                       anchor_frames=ANCHOR_FRAMES)
 
 
 @dataclass
@@ -170,7 +113,7 @@ def detection_forward(
     mask_threshold: float = 0.5,
     mask_blend_alpha: float = 0.0,
 ) -> DetectionPacket:
-    with torch.autocast(device_type=images.device.type, enabled=False):
+    with torch.autocast(device_type=images.device.type, dtype=torch.bfloat16, enabled=BENCH_BRANCH_BF16):
         images = images.float()
         intrinsics = intrinsics.float()
         if bbox_source == "gt":
@@ -324,7 +267,7 @@ def mano_forward(
     model: LingBotMapHand,
     packet: DetectionPacket,
 ) -> dict[str, Any]:
-    with torch.autocast(device_type=packet.images.device.type, enabled=False):
+    with torch.autocast(device_type=packet.images.device.type, dtype=torch.bfloat16, enabled=BENCH_BRANCH_BF16):
         packet.images = packet.images.float()
         packet.features = packet.features.float()
         packet.intrinsics = packet.intrinsics.float()
@@ -486,6 +429,7 @@ def _run_all_head_stream(
     mask_threshold: float = 0.5,
     mask_blend_alpha: float = 0.0,
     capture_postprocess: bool = False,
+    postprocess_storage: str = "cpu",
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any], dict[str, float]]:
     """Run 4+16 backbone memory with ordered heads on a separate CUDA stream."""
     if images.ndim != 5 or images.shape[0] != 1:
@@ -516,6 +460,10 @@ def _run_all_head_stream(
         raise ValueError("mask_blend_alpha requires gt_hand_masks")
     if not 0.0 <= mask_blend_alpha <= 1.0:
         raise ValueError(f"mask_blend_alpha must be in [0,1], got {mask_blend_alpha}")
+    if postprocess_storage not in ("cpu", "cpu_async", "cuda"):
+        raise ValueError("postprocess_storage must be cpu, cpu_async or cuda")
+    if postprocess_storage == "cuda" and images.shape[1]*2*images.shape[-2]*images.shape[-1] > 2*1024**3:
+        raise ValueError("CUDA mask capture exceeds 2 GiB; use CPU capture or shorter chunks")
     device = images.device
     backbone = model.backbone
     detection_stream = torch.cuda.Stream(device=device)
@@ -637,6 +585,9 @@ def _run_all_head_stream(
                 except BaseException:
                     pass
 
+    from .runtime.capture import AuxiliaryCapture
+    capture_tensor = AuxiliaryCapture(postprocess_storage, images.shape[1], ANCHOR_FRAMES)
+
     def consumer() -> None:
         try:
             prefilled.wait()
@@ -674,8 +625,8 @@ def _run_all_head_stream(
                     subset = output_subset(output)
                     if capture_postprocess:
                         for key in ('pred_keypoints_2d', 'mano_crop_intrinsics', 'mano_virtual_rotations', 'lsp_valid_mask'):
-                            subset[key] = output[key][0].detach().cpu()
-                        subset['postprocess_masks'] = (output['pred_bbox_mask_probability'][0] > mask_threshold).detach().cpu()
+                            subset[key] = capture_tensor(key, output[key][0], packet.order)
+                        subset['postprocess_masks'] = capture_tensor('postprocess_masks', output['pred_bbox_mask_probability'][0] > mask_threshold, packet.order)
                     chunks.append(subset)
                     end.record(mano_stream)
                     mano_events.append((start, end))
@@ -803,203 +754,16 @@ def validate_contract(
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
-    source = p.add_mutually_exclusive_group(required=True)
-    source.add_argument('--video', type=Path)
-    source.add_argument('--dataset-manifest', type=Path, help='Prepared scene manifest; reads RGB and per-frame intrinsics via UnifiedHandDataset')
-    p.add_argument('--scene', help='Exact scene name for dataset inference')
-    p.add_argument('--dataset-fps', type=float, help='Processed-frame FPS fallback only when dataset timestamps are missing')
-    p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--checkpoint', type=Path, required=True, help='Complete weights exported from the current training runs')
-    p.add_argument('--config', type=Path, default=ROOT / 'configs/infinihand_v1.json')
-    p.add_argument('--intrinsics', type=Path, help='JSON: fx,fy,cx,cy,image_width,image_height, in original video pixels')
-    p.add_argument('--mask-source', choices=['base', 'sam3-tracking'], default='base')
-    p.add_argument('--mask-threshold', type=float, default=0.9)
-    p.add_argument('--sam3-python', default=sys.executable)
-    p.add_argument('--sam3-source', type=Path, default=Path('/path/to/infinihand/third_party/sam3'))
-    p.add_argument('--sam3-checkpoint', type=Path, default=Path('/path/to/weights/sam3.pt'))
-    p.add_argument('--detector', type=Path, default=Path('/path/to/weights/detector.pt'))
-    p.add_argument('--cuda-graphs', action='store_true', help='Capture fixed-shape image encoders once for faster repeated inference; uses extra GPU memory')
-    p.add_argument('--ba-python', default=sys.executable)
-    p.add_argument('--droid-weights', type=Path, default=Path('/path/to/weights/droid.pth'))
-    p.add_argument('--no-ba', action='store_true')
-    p.add_argument('--no-postprocess', action='store_true', help='Disable offline fixed-beta, joint LSP depth and SG5 refinement')
-    p.add_argument('--postprocess-lambda', type=float, default=0.5, help='FP weight in mask-guided depth score (default: 0.5)')
-    p.add_argument('--postprocess-frame-batch', type=int, default=1024, help='Maximum frames per GPU LSP batch')
-    p.add_argument('--postprocess-raster-batch', type=int, default=4096, help='Maximum packed-mask candidates rendered together; reduce for lower VRAM')
-    p.add_argument('--ba-mode', choices=['fixed'], default='fixed', help='Fixed-stride keyframe BA')
-    p.add_argument('--ba-stride', type=int, default=10)
-    p.add_argument('--ba-depth-init', choices=['none', 'sparse'], default='none')
-    p.add_argument('--ba-no-reject-outliers', action='store_true', help='Disable update rejection for ablations')
-    p.add_argument('--max-frames', type=int, default=8192)
-    return p
+    from .cli import parser as cli_parser
+    return cli_parser()
+
 
 def main():
-    a = parser().parse_args()
-    if a.postprocess_frame_batch < 1 or a.postprocess_raster_batch < 1:
-        raise ValueError('Postprocessing batch sizes must be positive')
-    if not np.isfinite(a.postprocess_lambda) or a.postprocess_lambda <= 0:
-        raise ValueError('postprocess-lambda must be positive and finite')
-    if not 0 < a.mask_threshold < 1:
-        raise ValueError('mask threshold must be in (0,1)')
-    if not 4 <= a.max_frames <= 8192:
-        raise ValueError('max-frames must be between 4 and 8192')
-    if a.video is not None and a.intrinsics is None:
-        raise ValueError('Video inference requires --intrinsics')
-    if a.dataset_manifest is not None and (not a.scene or a.intrinsics is not None):
-        raise ValueError('Dataset inference requires --scene and reads intrinsics from metadata; omit --intrinsics')
-    if a.video is not None and (a.scene is not None or a.dataset_fps is not None):
-        raise ValueError('--scene and --dataset-fps are dataset-only options')
-    required = [a.checkpoint, a.config] + ([a.video, a.intrinsics] if a.video is not None else [a.dataset_manifest])
-    if a.ba_stride < 1:
-        raise ValueError('Require ba-stride >= 1')
-    if a.mask_source == 'sam3-tracking':
-        required += [a.sam3_checkpoint, a.detector, a.sam3_source]
-    if not a.no_ba:
-        required += [a.droid_weights]
-    for path in required:
-        if not path.exists():
-            raise FileNotFoundError(path)
-    a.output.mkdir(parents=True, exist_ok=True)
-    D = a.output / 'frames'
-    D.mkdir(exist_ok=True)
-    if list(D.glob('*.png')):
-        raise ValueError('Use a fresh output directory to avoid stale frame/mask mixing')
-    dataset_data = None
-    if a.dataset_manifest is not None:
-        from .inference_data import load_dataset_input
-        dataset_data = load_dataset_input(a.dataset_manifest, a.scene, a.max_frames, a.dataset_fps)
-        rgb, Ks = dataset_data['images'], dataset_data['intrinsics']
-        n, h, w = rgb.shape[:3]
-        fps = dataset_data['fps']
-        timestamps = dataset_data['timestamps_seconds']
-        if not a.no_ba and not np.allclose(Ks, Ks[:1], rtol=0, atol=1e-5):
-            raise ValueError('Camera BA currently requires constant intrinsics; use --no-ba for this scene with varying intrinsics')
-        K0 = Ks[0]
-        Kd = dict(fx=float(K0[0,0]), fy=float(K0[1,1]), cx=float(K0[0,2]), cy=float(K0[1,2]), image_width=w, image_height=h)
-        a.intrinsics = a.output / 'input_intrinsics.json'
-        a.intrinsics.write_text(json.dumps(Kd, indent=2))
-        for i, im in enumerate(rgb):
-            if not cv2.imwrite(str(D / f'{i:06d}.png'), im[:,:,::-1]):
-                raise IOError('Failed to save dataset RGB frame')
-        np.savez_compressed(a.output / 'input_metadata.npz', intrinsics=Ks,
-                            source_frame_ids=dataset_data['source_frame_ids'], timestamps_seconds=timestamps)
-    else:
-        Kd = json.loads(a.intrinsics.read_text())
-        cap = cv2.VideoCapture(str(a.video))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if not cap.isOpened() or fps <= 0:
-            raise ValueError('Cannot open video or invalid FPS')
-        n = 0
-        while n < a.max_frames:
-            (ok, im) = cap.read()
-            if not ok:
-                break
-            (h, w) = im.shape[:2]
-            if (w, h) != (Kd['image_width'], Kd['image_height']):
-                raise ValueError('Video dimensions differ from intrinsics metadata; explicitly calibrate/rescale before inference')
-            cv2.imwrite(str(D / f'{n:06d}.png'), im)
-            n += 1
-        cap.release()
-        if n < 4:
-            raise ValueError('At least four frames required')
-        if n > 8192:
-            raise ValueError('Maximum supported temporal index is 8192')
-        timestamps = np.arange(n, dtype=np.float64) / fps
-    boxes = np.zeros((n, 2, 4), np.float32)
-    valid = np.zeros((n, 2), bool)
-    if a.mask_source == 'sam3-tracking':
-        import yaml
-        cfg = yaml.safe_load((ROOT / 'third_party/sam3_tracking/configs/default.yaml').read_text())
-        cfg.update(output_fps=fps, write_visualization=False, wandb_mode='disabled')
-        cf = a.output / 'sam3_config.yaml'
-        cf.write_text(yaml.safe_dump(cfg))
-        env = os.environ.copy()
-        env['PYTHONPATH'] = str(ROOT / 'third_party/sam3_tracking/src')
-        subprocess.run([a.sam3_python, '-m', 'sam3_tracking', 'frames', '--frames-dir', str(D.resolve()), '--output-dir', str((a.output / 'sam3').resolve()), '--config', str(cf.resolve()), '--detector-weight', str(a.detector.resolve()), '--sam3-checkpoint', str(a.sam3_checkpoint.resolve()), '--sam3-src', str(a.sam3_source.resolve())], env=env, check=True)
-        records = [json.loads(line) for line in (a.output / 'sam3/masks.jsonl').read_text().splitlines()]
-        assert len(records) == n * 2
-        seen = set()
-        for row in records:
-            i = int(row['frame_idx'])
-            s = {'right': 0, 'left': 1}[row['side_name']]
-            assert 0 <= i < n and (i, s) not in seen
-            seen.add((i, s))
-            if row['mask_box_xyxy'] is not None and row['mask_area'] > 0:
-                boxes[i, s] = np.array(row['mask_box_xyxy']) / [w, h, w, h]
-                valid[i, s] = True
-    (model, load_seconds) = build_model(a.checkpoint, torch.device('cuda:0'), a.config)
-    graph_setup = prepare_cuda_graphs(model) if a.cuda_graphs else 0.0
-    images = np.stack([cv2.resize(cv2.imread(str(D / f'{i:06d}.png')), (518, 378))[:, :, ::-1] for i in range(n)])
-    images = torch.from_numpy(np.ascontiguousarray(images)).permute(0, 3, 1, 2).float().div_(255).unsqueeze(0).cuda()
-    if dataset_data is None:
-        Ks = np.broadcast_to(np.array([[Kd['fx'], 0, Kd['cx']], [0, Kd['fy'], Kd['cy']], [0, 0, 1]], np.float32), (n,3,3)).copy()
-    else:
-        Ks = dataset_data['intrinsics'].copy()
-    Ks[:,0] *= 518 / w
-    Ks[:,1] *= 378 / h
-    intr = torch.from_numpy(Ks).unsqueeze(0).cuda()
-    opts = dict(bbox_source='gt' if a.mask_source == 'sam3-tracking' else 'mask', mask_threshold=a.mask_threshold, capture_postprocess=not a.no_postprocess)
-    if a.mask_source == 'sam3-tracking':
-        opts.update(gt_hand_boxes=torch.from_numpy(boxes)[None].cuda(), gt_hand_valid=torch.from_numpy(valid)[None].cuda())
-    with torch.inference_mode():
-        (out, stats, timing) = run_dual_stream(model, images, intr, **opts)
-        (world, _) = camera_to_predicted_global(out)
-    validate_contract(stats, n)
-    arr = {k: v.cpu().numpy() if v.dtype == torch.bool else v.float().cpu().numpy() for (k, v) in out.items()}
-    poses = world['pred_camera_to_anchor'].float().cpu().numpy()
-    if a.mask_source == 'base':
-        boxes = arr['mask_tight_boxes']
-        valid = arr['presence_mask'] > 0.5
-    for (key, value) in arr.items():
-        if not np.isfinite(value).all():
-            raise ValueError('Non-finite model output: ' + key)
-    auxiliary = {'pred_keypoints_2d', 'mano_crop_intrinsics', 'mano_virtual_rotations', 'lsp_valid_mask', 'postprocess_masks'}
-    post_report = dict(enabled=False)
-    if not a.no_postprocess:
-        from .postprocess import refine_hands
-        masks = arr.pop('postprocess_masks')
-        if a.mask_source == 'sam3-tracking':
-            masks = np.zeros((n, 2, 378, 518), dtype=bool)
-            for row in records:
-                i = int(row['frame_idx'])
-                side = {'right': 0, 'left': 1}[row['side_name']]
-                mask_path = a.output / 'sam3' / row['mask_relpath']
-                mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-                if mask is None:
-                    raise FileNotFoundError(mask_path)
-                masks[i, side] = cv2.resize(mask, (518, 378), interpolation=cv2.INTER_NEAREST) > 0
-        raw = {k: v for k, v in arr.items() if k not in auxiliary}
-        np.savez_compressed(a.output / 'camera_space_raw.npz', **raw, valid=valid)
-        mano_path = (ROOT / json.loads(a.config.read_text())['mano_model_path']).resolve()
-        arr, post_report = refine_hands(dict(arr, valid=valid), Ks, masks,
-                                        timestamps, mano_path,
-                                        lambda_fp=a.postprocess_lambda,
-                                        frame_batch=a.postprocess_frame_batch,
-                                        raster_batch=a.postprocess_raster_batch)
-        post_report['mask_source'] = a.mask_source
-        (a.output / 'POSTPROCESS.json').write_text(json.dumps(post_report, indent=2))
-        arr.pop('valid')
-        arr = {k: v for k, v in arr.items() if k not in auxiliary}
-        del masks
-        for key, value in arr.items():
-            if not np.isfinite(value).all():
-                raise ValueError('Non-finite postprocessed output: ' + key)
-    np.savez_compressed(a.output / 'camera_space.npz', **arr, valid=valid)
-    np.savez_compressed(a.output / 'ba_inputs.npz', poses=poses, boxes=boxes)
-    del out, world, model, images, intr
-    torch.cuda.empty_cache()
-    if not a.no_ba:
-        subprocess.run([a.ba_python, '-m', 'infinihand.sparse_ba_backend', '--output', str(a.output.resolve()), '--intrinsics', str(a.intrinsics.resolve()), '--weights', str(a.droid_weights.resolve()), '--stride', str(a.ba_stride), '--depth-init', a.ba_depth_init] + (['--no-reject-outliers'] if a.ba_no_reject_outliers else []), cwd=ROOT, check=True)
-        poses = np.load(a.output / 'trajectory.npz')['poses']
-    if not np.isfinite(poses).all():
-        raise ValueError('Non-finite trajectory')
-    rot = poses[:, :3, :3]
-    trans = poses[:, :3, 3]
-    np.savez_compressed(a.output / 'world_space.npz', camera_to_world=poses, world_joints=np.einsum('tij,thnj->thni', rot, arr['camera_joints']) + trans[:, None, None, :], world_vertices=np.einsum('tij,thnj->thni', rot, arr['camera_vertices']) + trans[:, None, None, :], world_global_orient=rot[:, None] @ arr['camera_global_orient'], world_translation=np.einsum('tij,thj->thi', rot, arr['camera_translation']) + trans[:, None, :], hand_pose=arr['hand_pose'], betas=arr['betas'], valid=valid)
-    receipt = dict(input_mode="dataset" if dataset_data is not None else "video", scene=a.scene, time_source=dataset_data["time_source"] if dataset_data is not None else "video FPS", postprocess=post_report, cuda_graphs=a.cuda_graphs, cuda_graph_setup_seconds=graph_setup, feed_forward_fps=n/timing["camera_estimation_seconds"], ba_depth_init=None if a.no_ba else a.ba_depth_init, ba_reject_outliers=not (a.no_ba or a.ba_no_reject_outliers), ba_mode=None if a.no_ba else 'fixed', status='complete', frames=n, fps=fps, hand_slots=['right', 'left'], mask_source=a.mask_source, mask_threshold=a.mask_threshold, ba_stride=None if a.no_ba else a.ba_stride, coordinate_frame='first predicted camera', checkpoint=str(a.checkpoint), model_load_seconds=load_seconds, timing=timing, cache=stats)
-    (a.output / 'SUCCESS.json').write_text(json.dumps(receipt, indent=2))
-    print(json.dumps(receipt, indent=2))
+    from .cli import main as cli_main
+    cli_main(sys.modules[__name__])
+
+
 if __name__ == '__main__':
     main()

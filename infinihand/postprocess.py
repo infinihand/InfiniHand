@@ -363,3 +363,46 @@ def refine_hands(
         frame_batch=frame_batch,
         raster_batch=raster_batch,
     )
+
+
+def refine_hands_tensors(prediction, intrinsics, masks, timestamps, mano_model_path,
+                         *, lambda_fp=0.5, frame_batch=1024, raster_batch=4096,
+                         return_tensors=True):
+    """Device-resident refinement; only compact scheduling/audit data leave CUDA.
+
+    Returns CUDA predictions by default. The numerical algorithm, depth grid,
+    precision, validity and SG5 boundaries are identical to refine_hands.
+    """
+    required = {'betas', 'valid', 'hand_pose', 'camera_global_orient',
+                'camera_joints', 'camera_vertices', 'camera_translation',
+                'pred_keypoints_2d', 'mano_virtual_rotations',
+                'mano_crop_intrinsics', 'lsp_valid_mask'}
+    if not required.issubset(prediction) or any(k.startswith('world_') for k in prediction):
+        raise ValueError('Require complete camera-space predictions')
+    tensors = [*prediction.values(), intrinsics, masks]
+    if not all(torch.is_tensor(t) and t.is_cuda for t in tensors):
+        raise ValueError('All predictions, intrinsics and masks must be CUDA tensors')
+    device = intrinsics.device
+    if any(t.device != device for t in tensors):
+        raise ValueError('All inputs must share the same CUDA device')
+    valid = prediction['valid']; n = len(valid)
+    ts = np.asarray(timestamps, np.float64)
+    if n == 0 or valid.shape != (n, 2) or intrinsics.shape != (n, 3, 3):
+        raise ValueError('Invalid validity or intrinsics shape')
+    if masks.ndim != 4 or masks.shape[:2] != (n, 2) or masks.dtype != torch.bool:
+        raise ValueError('Require bool masks [T,2,H,W]')
+    if ts.shape != (n,) or not np.isfinite(ts).all() or np.any(np.diff(ts) <= 0):
+        raise ValueError('Require increasing finite timestamps')
+    if not bool(torch.isfinite(intrinsics).all()) or not np.isfinite(lambda_fp) or lambda_fp <= 0:
+        raise ValueError('Invalid intrinsics or lambda')
+    if frame_batch < 1 or raster_batch < 1:
+        raise ValueError('Batch sizes must be positive')
+    # Match the existing NumPy export boundary, which promotes network floats
+    # to FP32 before refinement. Do not retain BF16 parameters in output buffers.
+    prediction = {k: v.float() if v.is_floating_point() else v for k,v in prediction.items()}
+    from ._postprocess_gpu import refine_hands_gpu
+    with torch.cuda.device(device):
+        return refine_hands_gpu(prediction, intrinsics, masks, ts, mano_model_path,
+                                lambda_fp=lambda_fp, device=device,
+                                frame_batch=frame_batch, raster_batch=raster_batch,
+                                return_tensors=return_tensors)

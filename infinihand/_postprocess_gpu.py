@@ -89,6 +89,7 @@ def refine_hands_gpu(
     device="cuda",
     frame_batch=1024,
     raster_batch=4096,
+    return_tensors=False,
 ):
     """Refine one clip; called after public API validation.
 
@@ -111,11 +112,13 @@ def refine_hands_gpu(
 
     # 1. Upload the clip once and initialize the matching MANO assets.
     mark("begin")
-    valid = np.asarray(prediction["valid"], bool)
+    def host(a):
+        return a.detach().cpu().numpy() if torch.is_tensor(a) else np.asarray(a)
+    valid = host(prediction["valid"]).astype(bool)
     ts = np.asarray(timestamps, np.float64)
     n = len(valid)
     assert ts.shape == (n,) and np.isfinite(ts).all() and (np.diff(ts) > 0).all()
-    assert np.asarray(intrinsics).shape == (n, 3, 3) and lambda_fp > 0
+    assert intrinsics.shape == (n, 3, 3) and lambda_fp > 0
 
     def tensor(a, dtype=None):
         return torch.as_tensor(a, device=device, dtype=dtype)
@@ -146,7 +149,7 @@ def refine_hands_gpu(
     shape_reports = []
     for h, model in enumerate(models):
         ids = np.flatnonzero(
-            valid[:, h] & np.isfinite(prediction["betas"][:, h]).all(-1)
+            valid[:, h] & host(torch.isfinite(p["betas"][:, h]).all(-1))
         )
         ix = tensor(ids, torch.long)
         if not len(ids):
@@ -220,8 +223,8 @@ def refine_hands_gpu(
     # One metadata selection on host avoids CUDA nonzero synchronization per batch.
     ready = (
         valid
-        & np.asarray(masks).any((-1, -2))
-        & np.asarray(prediction["lsp_valid_mask"]).any(-1)
+        & host(mask.any(dim=(-1, -2)))
+        & host(p["lsp_valid_mask"].bool().any(dim=-1))
     )
     for h, model in enumerate(models):
         faces = tensor(model.faces.astype(np.int32), torch.int32)
@@ -421,7 +424,7 @@ def refine_hands_gpu(
                     else "median_fallback_no_inliers"
                 )
             )
-    result = {k: v.cpu().numpy() for k, v in q.items()}
+    result = q if return_tensors else {k: v.cpu().numpy() for k, v in q.items()}
     sel = selected.cpu().numpy()
     mark("download")
     torch.cuda.synchronize()

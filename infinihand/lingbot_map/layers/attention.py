@@ -640,20 +640,34 @@ class SDPAAttention(Attention):
                                 N // num_frame_per_block, self.head_dim)
 
             if not skip_append:
-                # KEYFRAME: store in cache (original behavior)
-                if kv_cache[f"k_{global_idx}"] is None:
-                    kv_cache[f"k_{global_idx}"] = k_reshaped
-                    kv_cache[f"v_{global_idx}"] = v_reshaped
-                else:
-                    kv_cache[f"k_{global_idx}"] = torch.cat((kv_cache[f"k_{global_idx}"], k_reshaped), dim=2)
-                    kv_cache[f"v_{global_idx}"] = torch.cat((kv_cache[f"v_{global_idx}"], v_reshaped), dim=2)
+                compact = False
+                if getattr(self, "inference_compact_kv", False):
+                    from ...runtime.kv_append import append_compact
+                    compact = append_compact(self, kv_cache, global_idx, k_reshaped,
+                                             v_reshaped, camera_token_idx, scale_token_idx)
+                if not compact:
+                    # KEYFRAME: store in cache (original behavior)
+                    if kv_cache[f"k_{global_idx}"] is None:
+                        kv_cache[f"k_{global_idx}"] = k_reshaped
+                        kv_cache[f"v_{global_idx}"] = v_reshaped
+                    else:
+                        kv_cache[f"k_{global_idx}"] = torch.cat((kv_cache[f"k_{global_idx}"], k_reshaped), dim=2)
+                        kv_cache[f"v_{global_idx}"] = torch.cat((kv_cache[f"v_{global_idx}"], v_reshaped), dim=2)
 
-                self._apply_kv_cache_eviction(
-                    kv_cache, global_idx, camera_token_idx, scale_token_idx, num_register_tokens
-                )
+                    self._apply_kv_cache_eviction(
+                        kv_cache, global_idx, camera_token_idx, scale_token_idx, num_register_tokens
+                    )
 
-                k_cached = kv_cache[f"k_{global_idx}"].clone()
-                v_cached = kv_cache[f"v_{global_idx}"].clone()
+                # Opt-in inference-only read: cache append/eviction replaces tensors
+                # with cat/slices; it does not mutate this storage. The owning
+                # stream consumes attention before its next cache update.
+                readonly = (not self.training and torch.is_inference_mode_enabled()
+                            and getattr(self, "inference_readonly_kv", False))
+                k_cached = kv_cache[f"k_{global_idx}"]
+                v_cached = kv_cache[f"v_{global_idx}"]
+                if not readonly:
+                    k_cached = k_cached.clone()
+                    v_cached = v_cached.clone()
             else:
                 # NON-KEYFRAME: attend to [cached + current] without storing in cache
                 if kv_cache[f"k_{global_idx}"] is not None:

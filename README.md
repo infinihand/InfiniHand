@@ -60,6 +60,8 @@ curl -L https://huggingface.co/cskrren/InfiniHand/resolve/main/v1/infinihand_v1.
   -o /path/to/weights/infinihand_v1.pt
 ```
 
+For optional CUDA Graphs, fused kernels, device-resident refinement and memory frame caching, see [Inference runtime options](docs/INFERENCE_RUNTIME.md).
+
 ### Inputs and intrinsics
 
 Edit `configs/infinihand_v1.json`, including `mano_model_path`. The inference checkpoint contains the learned backbone and Mask/MANO/Camera weights; licensed MANO assets are loaded separately.
