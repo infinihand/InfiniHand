@@ -1,0 +1,10 @@
+# Install the PyTorch/CUDA build matching the runtime before this file.
+huggingface-hub>=0.30
+numpy>=1.26,<2
+opencv-python-headless>=4.10,<5
+PyYAML>=6,<7
+torch>=2.7
+torchvision
+tqdm>=4.66
+ultralytics>=8.3
+wandb>=0.19

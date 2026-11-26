@@ -1,0 +1,12 @@
+# Single-checkpoint evaluation with the learned mask head.
+checkpoint: /path/to/weights/infinihand_v1.pt
+model_config: /path/to/InfiniHand/configs/infinihand_v1.json
+output_dir: /path/to/outputs/evaluation
+metadata_cache_dir: ''
+mask_threshold: 0.9
+max_frames: 8192
+datasets:
+  arctic: /path/to/data/manifests/test/arctic.json
+  hot3d: /path/to/data/manifests/test/hot3d.json
+  egodex: /path/to/data/manifests/test/egodex.json
+  hoi4d: /path/to/data/manifests/test/hoi4d.json
